@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#176b43"/>
+    </marker>
+    <style>
+      .title { font: 700 30px Arial, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #111; }
+      .body { font: 19px Arial, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #18231d; }
+      .small { font: 16px Arial, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #36443b; }
+      .module { fill: #d7f2b9; stroke: #08753e; stroke-width: 2; }
+      .box { fill: #f8fbf6; stroke: #2a7b52; stroke-width: 2; }
+      .label { fill: #eaf6df; stroke: #79ad55; stroke-width: 1.5; }
+      .line { stroke: #176b43; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #67c82a; stroke-width: 4; stroke-dasharray: 16 12; fill: white; }
+    </style>
+  </defs>
+  <rect x="38" y="35" width="1204" height="650" rx="2" class="dash"/>
+  <text x="70" y="82" class="title">ReliabilityPrior：记忆内容可靠性</text>
+  <text x="70" y="116" class="small">目标：r0 = P(Y_r = 1 | 记忆来源、轨迹和内容质量)</text>
+
+  <rect x="76" y="270" width="265" height="122" rx="22" class="module"/>
+  <text x="208" y="316" text-anchor="middle" class="title" style="font-size:25px">ReliabilityPrior</text>
+  <text x="208" y="350" text-anchor="middle" class="small">source replay + content fidelity</text>
+  <text x="208" y="374" text-anchor="middle" class="small">Beta / calibrated r model</text>
+
+  <rect x="380" y="150" width="320" height="145" rx="14" class="box"/>
+  <text x="402" y="184" class="title" style="font-size:22px">V：Source Replay</text>
+  <text x="402" y="218" class="body">重置历史源任务 A</text>
+  <text x="402" y="246" class="body">直接执行 raw_actions</text>
+  <text x="402" y="274" class="small">goal / invalid action / reward</text>
+
+  <rect x="380" y="390" width="320" height="145" rx="14" class="box"/>
+  <text x="402" y="424" class="title" style="font-size:22px">F：Content Fidelity</text>
+  <text x="402" y="458" class="body">对齐关键动作和实体</text>
+  <text x="402" y="486" class="body">检查遗漏、矛盾、顺序</text>
+  <text x="402" y="514" class="small">key_steps / trajectory / verifier</text>
+
+  <rect x="770" y="270" width="190" height="110" rx="14" class="label"/>
+  <text x="865" y="308" text-anchor="middle" class="title" style="font-size:25px">Y_r</text>
+  <text x="865" y="345" text-anchor="middle" class="body">V AND F</text>
+  <text x="865" y="369" text-anchor="middle" class="small">联合可靠性标签</text>
+
+  <rect x="1010" y="228" width="190" height="195" rx="14" class="module"/>
+  <text x="1105" y="267" text-anchor="middle" class="title" style="font-size:22px">Beta Update</text>
+  <text x="1032" y="306" class="body">alpha += Y_r</text>
+  <text x="1032" y="337" class="body">beta += 1-Y_r</text>
+  <text x="1032" y="376" class="body">r0 mean</text>
+  <text x="1032" y="404" class="body">variance / n_eff</text>
+
+  <path d="M341 331 L380 223" class="line"/>
+  <path d="M341 331 L380 462" class="line"/>
+  <path d="M700 223 L770 315" class="line"/>
+  <path d="M700 462 L770 335" class="line"/>
+  <path d="M960 325 L1010 325" class="line"/>
+
+  <rect x="78" y="590" width="1120" height="52" rx="10" class="label"/>
+  <text x="98" y="623" class="small">失败 trajectory 不因 label=False 自动变成不可信；它可作为高可靠 failure warning，但需单独验证 fail_reason。</text>
+</svg>

@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#176b43"/>
+    </marker>
+    <style>
+      .title { font: 700 30px Arial, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #111; }
+      .body { font: 19px Arial, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #18231d; }
+      .small { font: 16px Arial, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #36443b; }
+      .module { fill: #d7f2b9; stroke: #08753e; stroke-width: 2; }
+      .box { fill: #f8fbf6; stroke: #2a7b52; stroke-width: 2; }
+      .label { fill: #eaf6df; stroke: #79ad55; stroke-width: 1.5; }
+      .line { stroke: #176b43; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #67c82a; stroke-width: 4; stroke-dasharray: 16 12; fill: white; }
+    </style>
+  </defs>
+  <rect x="38" y="35" width="1204" height="650" rx="2" class="dash"/>
+  <text x="70" y="82" class="title">BehaviorPrior：行为依赖 d0</text>
+  <text x="70" y="116" class="small">目标：d0 = E[D_env(action_with, action_control)]</text>
+
+  <rect x="76" y="270" width="265" height="122" rx="22" class="module"/>
+  <text x="208" y="316" text-anchor="middle" class="title" style="font-size:25px">BehaviorPrior</text>
+  <text x="208" y="350" text-anchor="middle" class="small">paired Agent forward</text>
+  <text x="208" y="374" text-anchor="middle" class="small">ordinal distance predictor</text>
+
+  <rect x="380" y="145" width="325" height="160" rx="14" class="box"/>
+  <text x="402" y="180" class="title" style="font-size:22px">Treatment：with M</text>
+  <text x="402" y="216" class="body">同一 task / Agent / state</text>
+  <text x="402" y="246" class="body">注入真实 memory</text>
+  <text x="402" y="276" class="small">LLM -> action_with</text>
+
+  <rect x="380" y="390" width="325" height="160" rx="14" class="box"/>
+  <text x="402" y="425" class="title" style="font-size:22px">Control：placebo</text>
+  <text x="402" y="461" class="body">复制完全相同上下文</text>
+  <text x="402" y="491" class="body">移除 M / 匹配安慰剂</text>
+  <text x="402" y="521" class="small">LLM -> action_control</text>
+
+  <rect x="770" y="250" width="240" height="180" rx="14" class="label"/>
+  <text x="890" y="290" text-anchor="middle" class="title" style="font-size:22px">CanonicalAction</text>
+  <text x="790" y="327" class="body">tool / action_type</text>
+  <text x="790" y="357" class="body">target / destination</text>
+  <text x="790" y="387" class="body">arguments / status</text>
+  <text x="790" y="415" class="small">统一语义后比较</text>
+
+  <rect x="1060" y="235" width="135" height="210" rx="14" class="module"/>
+  <text x="1128" y="278" text-anchor="middle" class="title" style="font-size:23px">D_env</text>
+  <text x="1078" y="322" class="body">0.0 同动作</text>
+  <text x="1078" y="354" class="body">0.5 目标变</text>
+  <text x="1078" y="386" class="body">0.75 类型变</text>
+  <text x="1078" y="418" class="body">1.0 关键变</text>
+
+  <path d="M341 331 L380 225" class="line"/>
+  <path d="M341 331 L380 470" class="line"/>
+  <path d="M705 225 L770 325" class="line"/>
+  <path d="M705 470 L770 365" class="line"/>
+  <path d="M1010 340 L1060 340" class="line"/>
+
+  <rect x="77" y="590" width="1120" height="52" rx="10" class="label"/>
+  <text x="98" y="623" class="small">只比较可执行环境动作；解释文字变化可另记 D_message，不计入 D_env。</text>
+</svg>

@@ -1,0 +1,8 @@
+.env
+.DS_Store
+.db/
+gmemory_env/
+__pycache__/
+*.py[cod]
+data/alfworld/json_2.1.1/
+causal_diagnostic/results/
