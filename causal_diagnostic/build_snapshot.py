@@ -6,12 +6,17 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 from pathlib import Path
 import random
 import sys
 from typing import Any
 
 import numpy as np
+
+# The original runner uses this mirror because many cluster nodes cannot reach
+# huggingface.co directly. Respect an explicit user-provided endpoint instead.
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:

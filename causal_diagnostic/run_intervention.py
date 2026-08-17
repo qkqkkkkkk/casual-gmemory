@@ -13,12 +13,16 @@ import argparse
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import random
 import sys
 from typing import Any
 
 import numpy as np
+
+# Keep the diagnostic runnable on the same restricted networks as tasks/run.py.
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
