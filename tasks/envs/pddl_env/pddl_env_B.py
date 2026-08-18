@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Any
 import nltk
 import json
+import re
 import sys
 import os
 sys.path.append(os.path.join(os.getcwd(), 'tasks', 'envs', 'pddl_env')) 
@@ -58,8 +59,6 @@ class PDDLEnv(BaseEnv):
         self.last_obs = None
 
     def set_env(self, configs: dict) -> tuple[str, str]: 
-        nltk.download('punkt')
-        
         self.game_name: str = configs.get('game_name')
         problem_index: int = configs.get('problem_index')
         if self.game_name is None or problem_index is None:
@@ -257,7 +256,10 @@ class PDDLEnv(BaseEnv):
         all_valid_objects_name = [str(obj) for obj in all_valid_objects] 
         all_valid_objects_id = [obj.name for obj in all_valid_objects] 
 
-        tokens = nltk.word_tokenize(text)
+        try:
+            tokens = nltk.word_tokenize(text)
+        except LookupError:
+            tokens = re.findall(r"[A-Za-z0-9_]+|[(),]", text)
         
         predicate_name = None   
         for token in tokens:
