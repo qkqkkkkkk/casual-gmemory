@@ -3,6 +3,7 @@ from typing import Any
 import nltk
 import json
 import re
+import zipfile
 import sys
 import os
 sys.path.append(os.path.join(os.getcwd(), 'tasks', 'envs', 'pddl_env')) 
@@ -258,7 +259,7 @@ class PDDLEnv(BaseEnv):
 
         try:
             tokens = nltk.word_tokenize(text)
-        except LookupError:
+        except (LookupError, zipfile.BadZipFile, OSError):
             tokens = re.findall(r"[A-Za-z0-9_]+|[(),]", text)
         
         predicate_name = None   
