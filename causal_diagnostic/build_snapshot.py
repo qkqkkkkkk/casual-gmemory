@@ -10,9 +10,11 @@ import os
 from pathlib import Path
 import random
 import sys
+import time
 from typing import Any
 
 import numpy as np
+from tqdm import tqdm
 
 # The original runner uses this mirror because many cluster nodes cannot reach
 # huggingface.co directly. Respect an explicit user-provided endpoint instead.
@@ -81,6 +83,14 @@ def seed_everything(seed: int) -> None:
         pass
 
 
+def write_progress(path: Path, **fields: Any) -> None:
+    """Persist progress independently of the insight logger."""
+    path.write_text(
+        json.dumps({"updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **fields}, indent=2),
+        encoding="utf-8",
+    )
+
+
 def prepare_task(task_id: int, max_trials: int) -> tuple[dict[str, Any], Any]:
     tasks = get_task("pddl")
     if not 0 <= task_id < len(tasks):
@@ -115,7 +125,16 @@ def main() -> Path:
         embedding_func=embedding,
     )
 
-    first_task, env = prepare_task(args.task_ids[0], args.max_trials)
+    progress_path = output_memory_dir / "causal_snapshot_progress.json"
+    write_progress(
+        progress_path,
+        status="initialized",
+        total_tasks=len(args.task_ids),
+        completed_tasks=0,
+        task_ids=args.task_ids,
+    )
+
+    _, env = prepare_task(args.task_ids[0], args.max_trials)
     mas = get_mas("macnet")
     mas.build_system(
         ReasoningIO(llm_model=llm),
@@ -134,15 +153,32 @@ def main() -> Path:
     )
 
     records: list[dict[str, Any]] = []
-    for task_id in args.task_ids:
-        task_config, task_env = prepare_task(task_id, args.max_trials)
-        mas.set_env(task_env)
-        instruction = get_dataset_system_prompt("pddl", task_config)
-        for agent in mas.agents_team.values():
-            agent.add_task_instruction(instruction)
-        reward, done = mas.schedule(task_config)
-        records.append(
-            {
+    progress = tqdm(
+        args.task_ids,
+        desc="Building support memory",
+        unit="task",
+        dynamic_ncols=True,
+        mininterval=2.0,
+    )
+    try:
+        for task_index, task_id in enumerate(progress, start=1):
+            progress.set_postfix_str(f"starting task {task_id}", refresh=True)
+            write_progress(
+                progress_path,
+                status="running",
+                total_tasks=len(args.task_ids),
+                completed_tasks=task_index - 1,
+                current_task_id=task_id,
+                task_ids=args.task_ids,
+            )
+
+            task_config, task_env = prepare_task(task_id, args.max_trials)
+            mas.set_env(task_env)
+            instruction = get_dataset_system_prompt("pddl", task_config)
+            for agent in mas.agents_team.values():
+                agent.add_task_instruction(instruction)
+            reward, done = mas.schedule(task_config)
+            record = {
                 "task_id": task_id,
                 "game_name": task_config["game_name"],
                 "problem_index": task_config["problem_index"],
@@ -150,7 +186,31 @@ def main() -> Path:
                 "success": bool(done),
                 "steps": int(task_env.infos.get("steps", 0)),
             }
+            records.append(record)
+            progress.set_postfix_str(
+                f"finished task {task_id}, success={bool(done)}, steps={record['steps']}",
+                refresh=True,
+            )
+            write_progress(
+                progress_path,
+                status="running",
+                total_tasks=len(args.task_ids),
+                completed_tasks=task_index,
+                current_task_id=None,
+                last_result=record,
+                task_ids=args.task_ids,
+            )
+    except BaseException as exc:
+        write_progress(
+            progress_path,
+            status="failed",
+            total_tasks=len(args.task_ids),
+            completed_tasks=len(records),
+            current_task_id=args.task_ids[len(records)] if len(records) < len(args.task_ids) else None,
+            error=repr(exc),
+            task_ids=args.task_ids,
         )
+        raise
 
     manifest = {
         "experiment": "gmemory_pddl_support_memory_snapshot",
@@ -164,6 +224,15 @@ def main() -> Path:
     }
     manifest_path = output_memory_dir / "causal_snapshot_manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_progress(
+        progress_path,
+        status="completed",
+        total_tasks=len(args.task_ids),
+        completed_tasks=len(records),
+        current_task_id=None,
+        task_ids=args.task_ids,
+        manifest=str(manifest_path),
+    )
     print(manifest_path)
     return manifest_path
 
