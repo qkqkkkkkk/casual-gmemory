@@ -1,0 +1,30 @@
+{
+  "updated_at": "2026-08-19T08:32:52+0800",
+  "status": "completed",
+  "total_tasks": 20,
+  "completed_tasks": 20,
+  "current_task_id": null,
+  "task_ids": [
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49
+  ],
+  "manifest": "/mnt/mydata/hjq/casual-gmemory/causal_diagnostic/memory_snapshots/pddl_gripper_support_14b/g-memory/causal_snapshot_manifest.json"
+}

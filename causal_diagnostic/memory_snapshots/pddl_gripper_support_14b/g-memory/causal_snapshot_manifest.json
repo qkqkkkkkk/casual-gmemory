@@ -1,0 +1,192 @@
+{
+  "experiment": "gmemory_pddl_support_memory_snapshot",
+  "seed": 42,
+  "model": "qwen2.5:14b",
+  "task_ids": [
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49
+  ],
+  "graph_type": "Chain",
+  "node_num": 2,
+  "records": [
+    {
+      "task_id": 30,
+      "game_name": "gripper",
+      "problem_index": 0,
+      "reward": 1.0,
+      "success": true,
+      "steps": 20
+    },
+    {
+      "task_id": 31,
+      "game_name": "gripper",
+      "problem_index": 1,
+      "reward": 1.0,
+      "success": true,
+      "steps": 38
+    },
+    {
+      "task_id": 32,
+      "game_name": "gripper",
+      "problem_index": 2,
+      "reward": 0.75,
+      "success": false,
+      "steps": 50
+    },
+    {
+      "task_id": 33,
+      "game_name": "gripper",
+      "problem_index": 3,
+      "reward": 0,
+      "success": false,
+      "steps": 50
+    },
+    {
+      "task_id": 34,
+      "game_name": "gripper",
+      "problem_index": 4,
+      "reward": 0,
+      "success": false,
+      "steps": 50
+    },
+    {
+      "task_id": 35,
+      "game_name": "gripper",
+      "problem_index": 5,
+      "reward": 1.0,
+      "success": true,
+      "steps": 32
+    },
+    {
+      "task_id": 36,
+      "game_name": "gripper",
+      "problem_index": 6,
+      "reward": 0,
+      "success": false,
+      "steps": 50
+    },
+    {
+      "task_id": 37,
+      "game_name": "gripper",
+      "problem_index": 7,
+      "reward": 0,
+      "success": false,
+      "steps": 50
+    },
+    {
+      "task_id": 38,
+      "game_name": "gripper",
+      "problem_index": 8,
+      "reward": 0,
+      "success": false,
+      "steps": 50
+    },
+    {
+      "task_id": 39,
+      "game_name": "gripper",
+      "problem_index": 9,
+      "reward": 0,
+      "success": false,
+      "steps": 50
+    },
+    {
+      "task_id": 40,
+      "game_name": "gripper",
+      "problem_index": 10,
+      "reward": 0,
+      "success": false,
+      "steps": 50
+    },
+    {
+      "task_id": 41,
+      "game_name": "gripper",
+      "problem_index": 11,
+      "reward": 0,
+      "success": false,
+      "steps": 50
+    },
+    {
+      "task_id": 42,
+      "game_name": "gripper",
+      "problem_index": 12,
+      "reward": 0,
+      "success": false,
+      "steps": 50
+    },
+    {
+      "task_id": 43,
+      "game_name": "gripper",
+      "problem_index": 13,
+      "reward": 0,
+      "success": false,
+      "steps": 50
+    },
+    {
+      "task_id": 44,
+      "game_name": "gripper",
+      "problem_index": 14,
+      "reward": 0,
+      "success": false,
+      "steps": 50
+    },
+    {
+      "task_id": 45,
+      "game_name": "gripper",
+      "problem_index": 15,
+      "reward": 0,
+      "success": false,
+      "steps": 50
+    },
+    {
+      "task_id": 46,
+      "game_name": "gripper",
+      "problem_index": 16,
+      "reward": 0,
+      "success": false,
+      "steps": 50
+    },
+    {
+      "task_id": 47,
+      "game_name": "gripper",
+      "problem_index": 17,
+      "reward": 0,
+      "success": false,
+      "steps": 50
+    },
+    {
+      "task_id": 48,
+      "game_name": "gripper",
+      "problem_index": 18,
+      "reward": 0,
+      "success": false,
+      "steps": 50
+    },
+    {
+      "task_id": 49,
+      "game_name": "gripper",
+      "problem_index": 19,
+      "reward": 0,
+      "success": false,
+      "steps": 50
+    }
+  ],
+  "memory_records": 20
+}
