@@ -45,3 +45,44 @@ inner `g-memory` folder created by the original runner, such as
 `.db/<model>/pddl/macnet/g-memory/g-memory`. The script will fail early if the
 directory does not exist. Do not point it at a new, empty directory when
 testing whether a stored memory is useful.
+
+## Local-vs-team causal utility
+
+`run_local_team_intervention.py` keeps the same frozen-memory intervention,
+but records every MacNet worker output. Since workers propose actions while the
+decision node executes the final action, the local score is a transparent
+proxy: the worker PDDL-action validity rate. The team score is
+`reward - cost_weight * steps / max_trials`; the raw success, reward, steps,
+and complete worker/decision traces are retained in each JSON result.
+
+```bash
+python causal_diagnostic/run_local_team_intervention.py \
+  --task-id 35 \
+  --memory-dir causal_diagnostic/memory_snapshots/pddl_gripper_support_14b_clean/g-memory \
+  --model qwen2.5:14b \
+  --candidate-kind trajectory \
+  --candidate-index 0 \
+  --graph-type Chain \
+  --node-num 2 \
+  --max-trials 50 \
+  --cost-weight 0.25 \
+  --output-dir causal_diagnostic/results/local_team/task35_candidate0
+```
+
+`utility.classification` flags `local_positive_team_negative` and
+`local_negative_team_positive` mismatches. Aggregate completed runs with:
+
+```bash
+python causal_diagnostic/analyze_local_team_results.py \
+  --results-root causal_diagnostic/results/local_team \
+  --output-dir causal_diagnostic/results/local_team_summary
+```
+
+Generate a report-ready PNG and SVG, with `U_local` vs. `U_team` quadrants
+and outcome-category counts:
+
+```bash
+python causal_diagnostic/visualize_local_team_results.py \
+  --results-root causal_diagnostic/results/local_team \
+  --output-dir causal_diagnostic/results/local_team_summary
+```
