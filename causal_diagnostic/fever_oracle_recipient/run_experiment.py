@@ -46,6 +46,7 @@ from causal_diagnostic.fever_oracle_recipient.offline_env import OfflineFeverEnv
 from causal_diagnostic.fever_oracle_recipient.local_metric import score_evidence_pages
 from causal_diagnostic.fever_oracle_recipient.provenance import (
     SnapshotProvenanceError,
+    reconcile_retest_design,
     validate_snapshot_manifest,
 )
 from causal_diagnostic.fever_oracle_recipient.sampling import (
@@ -482,14 +483,6 @@ def main(argv: Sequence[str] | None = None) -> Path:
         "embedding_model": args.embedding_model,
         "selection_seed": args.selection_seed,
     }
-    run = {
-        **design,
-        "endpoint": args.endpoint or os.environ.get("OPENAI_API_BASE"),
-        "sample_seed_base": args.sample_seed_base,
-        "cache_seed_from": (
-            str(args.cache_seed_from.resolve()) if args.cache_seed_from else None
-        ),
-    }
     if args.retest_results is not None:
         args.retest_results = args.retest_results.resolve()
         previous_manifest_path = args.retest_results / "run_manifest.json"
@@ -498,8 +491,19 @@ def main(argv: Sequence[str] | None = None) -> Path:
         previous_manifest = json.loads(
             previous_manifest_path.read_text(encoding="utf-8")
         )
-        if previous_manifest.get("design_hash") != _stable_hash(design):
-            raise SystemExit("retest design_hash does not match current design")
+        try:
+            design = reconcile_retest_design(design, previous_manifest)
+        except SnapshotProvenanceError as exc:
+            raise SystemExit(str(exc)) from exc
+
+    run = {
+        **design,
+        "endpoint": args.endpoint or os.environ.get("OPENAI_API_BASE"),
+        "sample_seed_base": args.sample_seed_base,
+        "cache_seed_from": (
+            str(args.cache_seed_from.resolve()) if args.cache_seed_from else None
+        ),
+    }
 
     rows_path, existing = _prepare_output(args, design, run)
     cache_path = args.output_dir / "llm_cache.sqlite"

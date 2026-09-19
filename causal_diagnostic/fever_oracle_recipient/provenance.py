@@ -20,6 +20,57 @@ def stable_hash(value: Mapping[str, Any]) -> str:
     ).hexdigest()
 
 
+def reconcile_retest_design(
+    current_design: Mapping[str, Any],
+    previous_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Align a retest with seed 0 while ignoring Chroma byte-level drift.
+
+    Opening a persistent Chroma collection can change SQLite/WAL bytes even
+    when GMemory is read-only and its semantic records are unchanged.  Every
+    experimental field must still match; only the physical directory hash may
+    be inherited from the registered seed-0 design.
+    """
+    previous_design = previous_manifest.get("design")
+    if not isinstance(previous_design, dict):
+        raise SnapshotProvenanceError(
+            "retest seed-0 manifest has no design payload"
+        )
+    previous_hash = previous_manifest.get("design_hash")
+    if stable_hash(previous_design) != previous_hash:
+        raise SnapshotProvenanceError(
+            "retest seed-0 manifest has an invalid design hash"
+        )
+
+    ignored = {"memory_sha256"}
+    current_semantic = {
+        key: value for key, value in current_design.items() if key not in ignored
+    }
+    previous_semantic = {
+        key: value for key, value in previous_design.items() if key not in ignored
+    }
+    if current_semantic != previous_semantic:
+        keys = sorted(set(current_semantic) | set(previous_semantic))
+        mismatches = [
+            key
+            for key in keys
+            if current_semantic.get(key) != previous_semantic.get(key)
+        ]
+        raise SnapshotProvenanceError(
+            "retest semantic design differs from seed 0 in: "
+            + ", ".join(mismatches)
+        )
+
+    aligned = dict(current_design)
+    if "memory_sha256" in previous_design:
+        aligned["memory_sha256"] = previous_design["memory_sha256"]
+    if stable_hash(aligned) != previous_hash:
+        raise SnapshotProvenanceError(
+            "retest design could not be aligned with seed 0"
+        )
+    return aligned
+
+
 def validate_snapshot_manifest(
     manifest: Mapping[str, Any],
     *,
