@@ -28,8 +28,30 @@ class MASMemoryBase(StorageNameSpace, ABC):
     embedding_func: EmbeddingFunc
     
     def __post_init__(self):
-        self.persist_dir: str = os.path.join(self.global_config['working_dir'], self.namespace)
+        configured_persist_dir = self.global_config.get('persist_dir')
+        self.persist_dir: str = (
+            os.path.abspath(configured_persist_dir)
+            if configured_persist_dir
+            else os.path.join(self.global_config['working_dir'], self.namespace)
+        )
         os.makedirs(self.persist_dir, exist_ok=True)
+        self._retrieval_gate = None
+
+    def set_retrieval_gate(self, gate) -> None:
+        """Install an optional post-retrieval, pre-exposure gate.
+
+        The memory implementation still owns retrieval and persistence.  A gate
+        may only transform the tuple returned to the host MAS.
+        """
+
+        if gate is not None and not callable(getattr(gate, 'filter_retrieval', None)):
+            raise TypeError('retrieval gate must expose filter_retrieval()')
+        self._retrieval_gate = gate
+
+    def apply_retrieval_gate(self, result: tuple[list, list, list], **context):
+        if self._retrieval_gate is None:
+            return result
+        return self._retrieval_gate.filter_retrieval(result, **context)
         
     # ---------------------------------- inside-trial memory ----------------------------------
     def init_task_context( 

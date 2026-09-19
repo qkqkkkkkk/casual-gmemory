@@ -26,6 +26,13 @@ class RelianceAction(str, Enum):
     VERIFY = "verify"
 
 
+class ExposureAction(str, Enum):
+    """Deployment actions for a host-defined team exposure event."""
+
+    KEEP = "keep"
+    DROP = "drop"
+
+
 @dataclass(frozen=True)
 class MemoryCandidate:
     memory_id: str
@@ -133,6 +140,47 @@ class MemoryUseEvent:
             if context.agent_id == agent_id:
                 return context
         raise KeyError(agent_id)
+
+
+@dataclass(frozen=True)
+class TeamMemoryExposureEvent:
+    """x = (query, state, memory, host exposure set, candidate set).
+
+    Unlike ``MemoryUseEvent`` this deployment unit has no receiver role.  The
+    gate accepts the host's exposure policy and decides only whether the whole
+    exposure is kept or blocked.
+    """
+
+    event_id: str
+    query: str
+    task_state: str
+    memory: MemoryCandidate
+    candidate_set: tuple[MemoryCandidate, ...]
+    exposure_agent_ids: tuple[str, ...]
+    retrieval: Optional[RetrievalMetadata] = None
+    task_metadata: Mapping[str, Any] = field(default_factory=dict)
+    reliability_prior: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if not self.event_id:
+            raise ValueError("event_id must not be empty")
+        candidate_ids = tuple(candidate.memory_id for candidate in self.candidate_set)
+        if len(set(candidate_ids)) != len(candidate_ids):
+            raise ValueError("candidate_set must not contain duplicate memory IDs")
+        if self.memory.memory_id not in candidate_ids:
+            raise ValueError("the target memory must be present in candidate_set")
+        if not self.exposure_agent_ids:
+            raise ValueError("exposure_agent_ids must not be empty")
+        if len(set(self.exposure_agent_ids)) != len(self.exposure_agent_ids):
+            raise ValueError("exposure_agent_ids must not contain duplicates")
+        if self.retrieval and self.retrieval.candidate_id != self.memory.memory_id:
+            raise ValueError("retrieval metadata belongs to a different candidate")
+        if self.reliability_prior is not None and not 0.0 <= self.reliability_prior <= 1.0:
+            raise ValueError("reliability_prior must be in [0, 1]")
+
+    @property
+    def exposure_count(self) -> int:
+        return len(self.exposure_agent_ids)
 
 
 @dataclass(frozen=True)
@@ -261,4 +309,3 @@ class RelianceDecision:
     threshold: float
     reason: str
     prediction: PotentialOutcomePrediction
-

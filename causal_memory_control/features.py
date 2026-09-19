@@ -8,7 +8,7 @@ import math
 import re
 from typing import Any, Mapping, Optional, Protocol, Sequence
 
-from .types import MemoryCandidate, MemoryUseEvent
+from .types import MemoryCandidate, MemoryUseEvent, TeamMemoryExposureEvent
 
 
 class TextEmbedder(Protocol):
@@ -112,6 +112,55 @@ class EventFeatureBuilder:
         return max(similarities, default=0.0)
 
 
+class TeamExposureFeatureBuilder:
+    """Role-free features for expected team-level exposure utility."""
+
+    def __init__(self, embedder: Optional[TextEmbedder] = None):
+        self.embedder = embedder or HashEmbedder()
+
+    def build(self, event: TeamMemoryExposureEvent) -> dict[str, float]:
+        task = self.embedder.embed(event.query)
+        state = self.embedder.embed(event.task_state)
+        memory = self.embedder.embed(event.memory.content)
+        peer_similarities = [
+            _cosine(memory, self.embedder.embed(candidate.content))
+            for candidate in event.candidate_set
+            if candidate.memory_id != event.memory.memory_id
+        ]
+        features: dict[str, float] = {
+            "sim_task_memory": _cosine(task, memory),
+            "sim_state_memory": _cosine(state, memory),
+            "sim_task_state": _cosine(task, state),
+            "candidate_count": float(len(event.candidate_set)),
+            "exposure_count": float(event.exposure_count),
+            "memory_content_length": float(len(event.memory.content)),
+            "memory_token_count": float(len(re.findall(r"\w+", event.memory.content))),
+            "candidate_redundancy_max": max(peer_similarities, default=0.0),
+            f"memory_type::{_safe(event.memory.memory_type)}": 1.0,
+        }
+        _add_optional(features, "reliability_prior", event.reliability_prior)
+        retrieval = event.retrieval
+        if retrieval is None:
+            for name in ("rank", "similarity", "distance", "hop", "path_weight"):
+                _add_optional(features, f"retrieval_{name}", None)
+            features["retrieval_source::missing"] = 1.0
+        else:
+            _add_optional(features, "retrieval_rank", retrieval.rank)
+            _add_optional(features, "retrieval_similarity", retrieval.similarity)
+            _add_optional(features, "retrieval_distance", retrieval.distance)
+            _add_optional(features, "retrieval_hop", retrieval.hop)
+            _add_optional(features, "retrieval_path_weight", retrieval.path_weight)
+            features[f"retrieval_source::{_safe(retrieval.source)}"] = 1.0
+            _add_numeric_mapping(features, "retrieval_meta", retrieval.metadata)
+        _add_numeric_mapping(features, "memory_meta", event.memory.metadata)
+        _add_numeric_mapping(features, "task_meta", event.task_metadata)
+        for name in ("task_type", "game_name", "difficulty", "graph_type", "mas_type"):
+            value = event.task_metadata.get(name)
+            if value is not None:
+                features[f"current_{name}::{_safe(value)}"] = 1.0
+        return features
+
+
 def _add_numeric_mapping(
     features: dict[str, float], prefix: str, values: Mapping[str, Any]
 ) -> None:
@@ -150,4 +199,3 @@ def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
 
 def _safe(value: Any) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(value).strip().lower()) or "unknown"
-

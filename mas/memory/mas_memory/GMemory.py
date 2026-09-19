@@ -244,9 +244,25 @@ class GMemory(MASMemoryBase):
         
         # directlt get insights
         top_k_insights = insights[:insight_topk]
-        self.insights_cache = top_k_insights
 
-        return top_success_task_trajectories, top_fail_task_trajectories, top_k_insights
+        # Optional plug-in boundary: retrieval above remains completely native.
+        # The gate can only control which already-retrieved candidates are
+        # exposed to the downstream MAS prompt.
+        retrieval = self.apply_retrieval_gate(
+            (
+                top_success_task_trajectories,
+                top_fail_task_trajectories,
+                top_k_insights,
+            ),
+            query_task=query_task,
+            task_state=getattr(
+                getattr(self, 'current_task_context', None),
+                'task_description',
+                query_task,
+            ),
+        )
+        self.insights_cache = list(retrieval[2])
+        return retrieval
 
 
     def _extract_mas_message(self, mas_message: MASMessage) -> MASMessage:

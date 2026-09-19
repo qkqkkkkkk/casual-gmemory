@@ -25,7 +25,7 @@ class FeverEnv(BaseEnv):
             raise ValueError('The configs dict should have the `task` attribute.')
         self.config = configs
         
-        task: str = f'Claim: {self.config.get('task')}'
+        task: str = f"Claim: {self.config.get('task')}"
         return task, task
     
     def reset(self) -> None:

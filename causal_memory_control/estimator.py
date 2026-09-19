@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import math
+from pathlib import Path
 import random
 from typing import Mapping, Sequence
 
@@ -87,6 +89,37 @@ class _LinearRegressor:
         return self.bias + sum(
             weight * value for weight, value in zip(self.weights, vector)
         )
+
+    def to_dict(self) -> dict:
+        return {
+            "learning_rate": self.learning_rate,
+            "epochs": self.epochs,
+            "l2": self.l2,
+            "seed": self.seed,
+            "feature_names": list(self.feature_names),
+            "means": self.means,
+            "scales": self.scales,
+            "weights": self.weights,
+            "bias": self.bias,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping) -> "_LinearRegressor":
+        model = cls(
+            learning_rate=float(payload["learning_rate"]),
+            epochs=int(payload["epochs"]),
+            l2=float(payload["l2"]),
+            seed=int(payload["seed"]),
+        )
+        model.feature_names = tuple(str(name) for name in payload["feature_names"])
+        model.means = [float(value) for value in payload["means"]]
+        model.scales = [float(value) for value in payload["scales"]]
+        model.weights = [float(value) for value in payload["weights"]]
+        model.bias = float(payload["bias"])
+        width = len(model.feature_names)
+        if not (len(model.means) == len(model.scales) == len(model.weights) == width):
+            raise ValueError("invalid regressor checkpoint dimensions")
+        return model
 
 
 class AmortizedUtilityEstimator:
@@ -207,6 +240,57 @@ class AmortizedUtilityEstimator:
         values = [models[outcome].predict(features) for models in self._models]
         return sum(values) / len(values)
 
+    def to_dict(self) -> dict:
+        if not self.fitted:
+            raise RuntimeError("cannot serialize an unfitted estimator")
+        return {
+            "schema": "amortized-utility-estimator-v1",
+            "config": {
+                "ensemble_size": self.ensemble_size,
+                "min_samples": self.min_samples,
+                "learning_rate": self.learning_rate,
+                "epochs": self.epochs,
+                "l2": self.l2,
+                "seed": self.seed,
+                "utility_threshold": self.utility_threshold,
+                "include_residual_noise": self.include_residual_noise,
+            },
+            "training_samples": self.training_samples,
+            "residual_use": self._residual_use,
+            "residual_drop": self._residual_drop,
+            "models": [
+                {"use": use.to_dict(), "drop": drop.to_dict()}
+                for use, drop in self._models
+            ],
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping) -> "AmortizedUtilityEstimator":
+        if payload.get("schema") != "amortized-utility-estimator-v1":
+            raise ValueError("unsupported estimator checkpoint schema")
+        estimator = cls(**dict(payload["config"]))
+        estimator._models = [
+            (
+                _LinearRegressor.from_dict(item["use"]),
+                _LinearRegressor.from_dict(item["drop"]),
+            )
+            for item in payload["models"]
+        ]
+        if len(estimator._models) != estimator.ensemble_size:
+            raise ValueError("checkpoint ensemble size does not match its config")
+        estimator.training_samples = int(payload["training_samples"])
+        estimator._residual_use = float(payload["residual_use"])
+        estimator._residual_drop = float(payload["residual_drop"])
+        estimator.fitted = True
+        return estimator
+
+    def save(self, path: str | Path) -> None:
+        Path(path).write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
+
+    @classmethod
+    def load(cls, path: str | Path) -> "AmortizedUtilityEstimator":
+        return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
+
 
 def _fit_standardizer(
     matrix: Sequence[Sequence[float]],
@@ -242,4 +326,3 @@ def _sample_variance(values: Sequence[float]) -> float:
         return 0.0
     mean = sum(values) / len(values)
     return sum((value - mean) ** 2 for value in values) / (len(values) - 1)
-

@@ -21,7 +21,12 @@ from .estimator import (
     PotentialOutcomeExample,
     example_from_audit,
 )
-from .features import EventFeatureBuilder, GMemoryEmbeddingAdapter, HashEmbedder
+from .features import (
+    EventFeatureBuilder,
+    GMemoryEmbeddingAdapter,
+    HashEmbedder,
+    TeamExposureFeatureBuilder,
+)
 from .gmemory_adapter import (
     AdaptedGMemoryRetrieval,
     GMemoryPromptInputs,
@@ -40,6 +45,11 @@ from .oracle import (
     OracleExample,
     PolicyEvaluation,
 )
+from .runtime_gate import (
+    ExposureDecision,
+    GMemoryExposureGate,
+    save_gate_checkpoint,
+)
 from .protocols import (
     BehaviorDistance,
     BranchRunner,
@@ -53,6 +63,7 @@ from .types import (
     BranchRequest,
     CounterfactualAuditResult,
     Estimate,
+    ExposureAction,
     InterventionArm,
     MemoryCandidate,
     MemoryUseEvent,
@@ -62,6 +73,7 @@ from .types import (
     RelianceAction,
     RelianceDecision,
     RetrievalMetadata,
+    TeamMemoryExposureEvent,
 )
 
 __all__ = [
@@ -79,9 +91,12 @@ __all__ = [
     "CounterfactualAudit",
     "CounterfactualAuditResult",
     "Estimate",
+    "ExposureAction",
     "EventFeatureBuilder",
+    "ExposureDecision",
     "ExactMatchDistance",
     "GMemoryEmbeddingAdapter",
+    "GMemoryExposureGate",
     "GMemoryPromptInputs",
     "GMemoryRetrievalAdapter",
     "HashEmbedder",
@@ -107,6 +122,8 @@ __all__ = [
     "RelianceController",
     "RelianceDecision",
     "RetrievalMetadata",
+    "TeamExposureFeatureBuilder",
+    "TeamMemoryExposureEvent",
     "SignConsistency",
     "SnapshotCheckpointBackend",
     "TokenJaccardDistance",
@@ -118,4 +135,5 @@ __all__ = [
     "observation_count_distribution",
     "oracle_noise_floor",
     "stratify_pivotality",
+    "save_gate_checkpoint",
 ]

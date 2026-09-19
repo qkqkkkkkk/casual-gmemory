@@ -56,6 +56,15 @@ OPENAI_API_KEY = ""  # for OpenAI LLM backend
     python tasks/run.py --task fever --reasoning io --mas_memory g-memory --mas_trials 15 --mas_type autogen --model <your model here>
     ```
 
+### 🧪 Plug-in Team Exposure Gate
+
+An experimental conservative KEEP/DROP gate is available at GMemory's
+post-retrieval boundary. It supports the full AutoGen, DyLAN, and MacNet
+pipelines without changing native retrieval or memory writes. See
+[`causal_memory_control/README.md`](causal_memory_control/README.md) for
+training, frozen-snapshot evaluation, paired task-completion comparison, and
+the dedicated offline FEVER implementation.
+
 ## 🫡 Citation
 If you find this repository helpful, a citation to our paper would be greatly appreciated:
 ```
@@ -70,4 +79,3 @@ If you find this repository helpful, a citation to our paper would be greatly ap
 ## 🙏 Acknowledgement
 - We sincerely thank [ExpeL](https://github.com/LeapLabTHU/ExpeL) for providing their prompt designs.
 - We also extend our heartfelt thanks to [AgentSquare](https://github.com/tsinghua-fib-lab/AgentSquare) for their dataset environments and baseline implementations.
-
