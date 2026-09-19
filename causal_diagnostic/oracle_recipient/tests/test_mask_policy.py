@@ -61,6 +61,34 @@ class MaskPolicyTests(unittest.TestCase):
         self.assertEqual(decision_insights, ["other"])
         self.assertFalse(exposed)
 
+    def test_isolated_exposure_keeps_only_selected_worker(self):
+        mas = RecipientMaskedMacNet()
+        mas.memory_policy = MemoryMaskPolicy(
+            condition="only_solver_0",
+            candidate_kind="trajectory",
+            candidate_index=0,
+            drop_recipients=frozenset(("solver_1", "solver_2")),
+            drop_from_decision=True,
+        )
+        trajectories = ["target", "other"]
+        for recipient, expected_exposure in (
+            ("solver_0", True),
+            ("solver_1", False),
+            ("solver_2", False),
+        ):
+            selected, _, exposed = mas._memory_for(
+                trajectories, [], recipient=recipient
+            )
+            self.assertEqual(exposed, expected_exposure)
+            self.assertEqual(
+                selected, trajectories if expected_exposure else ["other"]
+            )
+        decision, _, exposed = mas._memory_for(
+            trajectories, [], recipient=None, decision=True
+        )
+        self.assertEqual(decision, ["other"])
+        self.assertFalse(exposed)
+
     def test_prompt_seed_is_stable_and_experiment_specific(self):
         first = object.__new__(SeededCachedChat)
         first.model_name = "model"
@@ -75,4 +103,3 @@ class MaskPolicyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

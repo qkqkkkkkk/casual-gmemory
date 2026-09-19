@@ -1,5 +1,16 @@
 # Frozen-Memory Causal Diagnostic
 
+## Recommended FEVER RQ2/RQ3/RQ4 experiment
+
+The original PDDL feasibility run can produce a technically valid snapshot but
+no successful trajectories, which leaves a successful-memory intervention
+undefined. The replacement offline FEVER experiment keeps native GMemory and
+native MacNet while using a deterministic, leakage-safe binary task split.
+
+See [`fever_oracle_recipient/README.md`](fever_oracle_recipient/README.md) for
+the snapshot builder, four-condition isolated-exposure runner, independent
+retest, and exact commands.
+
 This directory runs one PDDL/MacNet episode twice on the same G-Memory
 snapshot. The `with_memory` branch receives the frozen retrieval unchanged.
 The `without_candidate` branch receives the same retrieval except for one

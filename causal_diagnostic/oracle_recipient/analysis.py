@@ -12,7 +12,7 @@ import random
 from typing import Any, Mapping, Sequence
 
 
-ANALYSIS_SCHEMA = "gmemory-macnet-oracle-recipient-analysis-v2"
+ANALYSIS_SCHEMA = "gmemory-macnet-rq234-analysis-v3"
 
 
 class AnalysisError(ValueError):
@@ -98,7 +98,20 @@ def build_events(
     rows: Sequence[Mapping[str, Any]], recipients: Sequence[str]
 ) -> list[dict[str, Any]]:
     recipients = tuple(recipients)
-    required = ("use_all", "global_drop", *(f"drop_{r}" for r in recipients))
+    available_conditions = {str(row["condition"]) for row in rows}
+    isolated_conditions = {f"only_{recipient}" for recipient in recipients}
+    marginal_conditions = {f"drop_{recipient}" for recipient in recipients}
+    if isolated_conditions <= available_conditions:
+        recipient_intervention = "isolated_exposure"
+        required = ("use_all", "global_drop", *sorted(isolated_conditions))
+    elif marginal_conditions <= available_conditions:
+        recipient_intervention = "all_minus_one"
+        required = ("use_all", "global_drop", *sorted(marginal_conditions))
+    else:
+        raise AnalysisError(
+            "rows are missing conditions for both the isolated-exposure and "
+            "all-minus-one recipient designs"
+        )
     grouped: dict[tuple[int, str], dict[str, dict[int, Mapping[str, Any]]]] = {}
     for row in rows:
         key = (int(row["task_id"]), str(row["candidate"]["candidate_id"]))
@@ -137,6 +150,28 @@ def build_events(
                 name: _mean(values) for name, values in samples.items()
             }
             outcomes[condition]["samples"] = samples
+            local_samples: dict[str, list[float]] = {}
+            for recipient in recipients:
+                values = []
+                for repeat in repeat_indices:
+                    metric = (
+                        conditions[condition][repeat]
+                        .get("outcome", {})
+                        .get("local_metrics", {})
+                        .get(recipient, {})
+                    )
+                    if "f1" not in metric:
+                        values = []
+                        break
+                    values.append(float(metric["f1"]))
+                if values:
+                    local_samples[recipient] = values
+            if local_samples:
+                outcomes[condition]["local_metric_samples"] = local_samples
+                outcomes[condition]["local_metric_means"] = {
+                    recipient: _mean(values)
+                    for recipient, values in local_samples.items()
+                }
         for repeat in repeat_indices:
             seeds = {
                 int(conditions[condition][repeat]["sample_seed"])
@@ -149,11 +184,14 @@ def build_events(
         first = conditions["use_all"][repeat_indices[0]]
         events.append(
             {
-                "event_id": f"pddl-{task_id}-{candidate_id}",
+                "event_id": str(
+                    first.get("event_id", f"pddl-{task_id}-{candidate_id}")
+                ),
                 "task_id": task_id,
                 "candidate_id": candidate_id,
                 "candidate": dict(first["candidate"]),
                 "repeat_count": len(repeat_indices),
+                "recipient_intervention": recipient_intervention,
                 "outcomes": outcomes,
             }
         )
@@ -205,13 +243,66 @@ def _recipient_summary(
 ) -> dict[str, Any]:
     decorated = []
     for event in events:
-        q_use = float(event["outcomes"]["use_all"][metric])
-        utilities = {
-            recipient: q_use
-            - float(event["outcomes"][f"drop_{recipient}"][metric])
-            for recipient in recipients
-        }
+        intervention = str(event.get("recipient_intervention", "all_minus_one"))
+        if intervention == "isolated_exposure":
+            q_control = float(event["outcomes"]["global_drop"][metric])
+            utilities = {
+                recipient: float(event["outcomes"][f"only_{recipient}"][metric])
+                - q_control
+                for recipient in recipients
+            }
+        else:
+            q_use = float(event["outcomes"]["use_all"][metric])
+            utilities = {
+                recipient: q_use
+                - float(event["outcomes"][f"drop_{recipient}"][metric])
+                for recipient in recipients
+            }
         signs = {recipient: _sign(value, delta) for recipient, value in utilities.items()}
+        split_half_signs: list[dict[str, int]] = []
+        repeat_count = int(event["repeat_count"])
+        midpoint = repeat_count // 2
+        if repeat_count >= 4 and midpoint > 0:
+            for indices in (range(0, midpoint), range(midpoint, repeat_count)):
+                half: dict[str, int] = {}
+                for recipient in recipients:
+                    if intervention == "isolated_exposure":
+                        treated_samples = event["outcomes"][f"only_{recipient}"][
+                            "samples"
+                        ][metric]
+                        control_samples = event["outcomes"]["global_drop"][
+                            "samples"
+                        ][metric]
+                        values = [
+                            float(treated_samples[index])
+                            - float(control_samples[index])
+                            for index in indices
+                        ]
+                    else:
+                        use_samples = event["outcomes"]["use_all"]["samples"][
+                            metric
+                        ]
+                        drop_samples = event["outcomes"][f"drop_{recipient}"][
+                            "samples"
+                        ][metric]
+                        values = [
+                            float(use_samples[index]) - float(drop_samples[index])
+                            for index in indices
+                        ]
+                    half[recipient] = _sign(_mean(values), delta)
+                split_half_signs.append(half)
+        reproducible_orientations = []
+        if len(split_half_signs) == 2:
+            for left, right in combinations(recipients, 2):
+                first = (split_half_signs[0][left], split_half_signs[0][right])
+                second = (split_half_signs[1][left], split_half_signs[1][right])
+                if first == second and first in {(1, -1), (-1, 1)}:
+                    reproducible_orientations.append(
+                        {
+                            "positive_recipient": left if first[0] == 1 else right,
+                            "negative_recipient": right if first[1] == -1 else left,
+                        }
+                    )
         decorated.append(
             {
                 "event_id": event["event_id"],
@@ -222,6 +313,12 @@ def _recipient_summary(
                 "direct_sign_flip": 1 in signs.values() and -1 in signs.values(),
                 "any_sign_heterogeneity": len(set(signs.values())) > 1,
                 "utility_range": max(utilities.values()) - min(utilities.values()),
+                "split_half_signs": [
+                    {recipient: _label(value) for recipient, value in half.items()}
+                    for half in split_half_signs
+                ],
+                "stable_recipient_sign_flip": bool(reproducible_orientations),
+                "stable_flip_orientations": reproducible_orientations,
             }
         )
     per_recipient = {}
@@ -259,6 +356,9 @@ def _recipient_summary(
         }
     return {
         "metric": metric,
+        "recipient_intervention": events[0].get(
+            "recipient_intervention", "all_minus_one"
+        ),
         "direct_sign_flip_rate": estimate(
             [float(event["direct_sign_flip"]) for event in decorated]
         ),
@@ -268,8 +368,214 @@ def _recipient_summary(
         "mean_utility_range": estimate(
             [float(event["utility_range"]) for event in decorated]
         ),
+        "split_half_status": (
+            "ok"
+            if all(len(event["split_half_signs"]) == 2 for event in decorated)
+            else "insufficient_repeats"
+        ),
+        "split_half_reproducible_sign_flip_rate": (
+            estimate(
+                [
+                    float(event["stable_recipient_sign_flip"])
+                    for event in decorated
+                ]
+            )
+            if all(len(event["split_half_signs"]) == 2 for event in decorated)
+            else None
+        ),
         "per_recipient": per_recipient,
         "pairwise": pairwise,
+        "events": decorated,
+    }
+
+
+def _utility_pattern(local_sign: int, team_sign: int) -> str:
+    if local_sign == 0 or team_sign == 0:
+        return "neutral_involved"
+    return (
+        ("local_positive" if local_sign > 0 else "local_negative")
+        + "_team_"
+        + ("positive" if team_sign > 0 else "negative")
+    )
+
+
+def _pearson(points: Sequence[tuple[float, float]]) -> float | None:
+    if len(points) < 2:
+        return None
+    left = [float(point[0]) for point in points]
+    right = [float(point[1]) for point in points]
+    left_mean, right_mean = _mean(left), _mean(right)
+    numerator = sum(
+        (a - left_mean) * (b - right_mean) for a, b in zip(left, right)
+    )
+    left_scale = math.sqrt(sum((value - left_mean) ** 2 for value in left))
+    right_scale = math.sqrt(sum((value - right_mean) ** 2 for value in right))
+    if left_scale == 0.0 or right_scale == 0.0:
+        return None
+    return numerator / (left_scale * right_scale)
+
+
+def _clustered_correlation(
+    points_by_event: Sequence[Sequence[tuple[float, float]]],
+    *,
+    samples: int,
+    confidence_level: float,
+    seed: int,
+) -> dict[str, Any]:
+    point = _pearson([point for event in points_by_event for point in event])
+    if point is None:
+        return {"status": "undefined_zero_variance", "estimate": None}
+    rng = random.Random(seed)
+    draws = []
+    for _ in range(samples):
+        sampled = [
+            points_by_event[rng.randrange(len(points_by_event))]
+            for _ in points_by_event
+        ]
+        value = _pearson([pair for event in sampled for pair in event])
+        if value is not None:
+            draws.append(value)
+    if not draws:
+        return {"status": "undefined_bootstrap_variance", "estimate": point}
+    alpha = (1.0 - confidence_level) / 2.0
+    return {
+        "status": "ok",
+        "estimate": point,
+        "ci_low": _percentile(draws, alpha),
+        "ci_high": _percentile(draws, 1.0 - alpha),
+        "confidence_level": confidence_level,
+        "bootstrap_samples": len(draws),
+        "bootstrap_unit": "held_out_task_candidate_event",
+    }
+
+
+def _local_team_summary(
+    events: Sequence[Mapping[str, Any]],
+    recipients: Sequence[str],
+    *,
+    delta: float,
+    estimate: Any,
+    bootstrap_samples: int,
+    confidence_level: float,
+    seed: int,
+) -> dict[str, Any]:
+    patterns = (
+        "local_positive_team_positive",
+        "local_positive_team_negative",
+        "local_negative_team_positive",
+        "local_negative_team_negative",
+        "neutral_involved",
+    )
+    decorated = []
+    event_pattern_values = {name: [] for name in patterns}
+    event_stable_mismatch = []
+    points_by_event: list[list[tuple[float, float]]] = []
+    split_half_eligible = True
+
+    for event in events:
+        event_rows = []
+        event_points = []
+        for recipient in recipients:
+            control = event["outcomes"]["global_drop"]
+            treated = event["outcomes"][f"only_{recipient}"]
+            local_control = control["local_metric_samples"][recipient]
+            local_treated = treated["local_metric_samples"][recipient]
+            team_control = control["samples"]["team_score"]
+            team_treated = treated["samples"]["team_score"]
+            local_deltas = [
+                float(right) - float(left)
+                for left, right in zip(local_control, local_treated)
+            ]
+            team_deltas = [
+                float(right) - float(left)
+                for left, right in zip(team_control, team_treated)
+            ]
+            local_utility = _mean(local_deltas)
+            team_utility = _mean(team_deltas)
+            local_sign = _sign(local_utility, delta)
+            team_sign = _sign(team_utility, delta)
+            pattern = _utility_pattern(local_sign, team_sign)
+            midpoint = len(local_deltas) // 2
+            eligible = len(local_deltas) >= 4 and midpoint > 0
+            split_half_eligible = split_half_eligible and eligible
+            half_patterns: list[str] = []
+            if eligible:
+                for indices in (range(0, midpoint), range(midpoint, len(local_deltas))):
+                    half_patterns.append(
+                        _utility_pattern(
+                            _sign(_mean([local_deltas[index] for index in indices]), delta),
+                            _sign(_mean([team_deltas[index] for index in indices]), delta),
+                        )
+                    )
+            reproducible_mismatch = bool(
+                len(half_patterns) == 2
+                and half_patterns[0] == half_patterns[1]
+                and half_patterns[0]
+                in {
+                    "local_positive_team_negative",
+                    "local_negative_team_positive",
+                }
+            )
+            row = {
+                "event_id": event["event_id"],
+                "task_id": event["task_id"],
+                "candidate_id": event["candidate_id"],
+                "recipient": recipient,
+                "local_metric": "fever_gold_evidence_page_f1",
+                "local_utility": local_utility,
+                "team_utility": team_utility,
+                "local_sign": _label(local_sign),
+                "team_sign": _label(team_sign),
+                "pattern": pattern,
+                "split_half_patterns": half_patterns,
+                "reproducible_mismatch": reproducible_mismatch,
+                "local_delta_samples": local_deltas,
+                "team_delta_samples": team_deltas,
+            }
+            decorated.append(row)
+            event_rows.append(row)
+            event_points.append((local_utility, team_utility))
+        points_by_event.append(event_points)
+        for name in patterns:
+            event_pattern_values[name].append(
+                sum(row["pattern"] == name for row in event_rows) / len(event_rows)
+            )
+        event_stable_mismatch.append(
+            sum(bool(row["reproducible_mismatch"]) for row in event_rows)
+            / len(event_rows)
+        )
+
+    pattern_rates = {
+        name: estimate(values) for name, values in event_pattern_values.items()
+    }
+    mismatch_values = [
+        positive_negative + negative_positive
+        for positive_negative, negative_positive in zip(
+            event_pattern_values["local_positive_team_negative"],
+            event_pattern_values["local_negative_team_positive"],
+        )
+    ]
+    return {
+        "status": "ok",
+        "local_metric": "FEVER gold evidence-page F1",
+        "team_metric": "exact FEVER binary-label accuracy",
+        "intervention": "isolated exposure minus global drop",
+        "event_count": len(events),
+        "recipient_count": len(recipients),
+        "pattern_rates": pattern_rates,
+        "local_team_mismatch_rate": estimate(mismatch_values),
+        "split_half_status": (
+            "ok" if split_half_eligible else "insufficient_repeats"
+        ),
+        "reproducible_local_team_mismatch_rate": (
+            estimate(event_stable_mismatch) if split_half_eligible else None
+        ),
+        "local_team_utility_correlation": _clustered_correlation(
+            points_by_event,
+            samples=bootstrap_samples,
+            confidence_level=confidence_level,
+            seed=seed,
+        ),
         "events": decorated,
     }
 
@@ -316,6 +622,33 @@ def analyze_run(
             events, recipients, metric="success", delta=delta, estimate=estimate
         ),
     }
+    rq4: dict[str, Any] = {
+        "status": "not_available",
+        "reason": "isolated exposure with objective local metrics is required",
+    }
+    isolated = all(
+        event.get("recipient_intervention") == "isolated_exposure"
+        for event in events
+    )
+    has_local_metrics = isolated and all(
+        "local_metric_samples" in event["outcomes"]["global_drop"]
+        and all(
+            "local_metric_samples"
+            in event["outcomes"][f"only_{recipient}"]
+            for recipient in recipients
+        )
+        for event in events
+    )
+    if has_local_metrics:
+        rq4 = _local_team_summary(
+            events,
+            recipients,
+            delta=delta,
+            estimate=estimate,
+            bootstrap_samples=bootstrap_samples,
+            confidence_level=confidence_level,
+            seed=seed + 5_000,
+        )
     return {
         "analysis_schema": ANALYSIS_SCHEMA,
         "event_count": len(events),
@@ -325,6 +658,7 @@ def analyze_run(
         "bootstrap_unit": "held_out_task_candidate_event",
         "rq2": rq2,
         "rq3": rq3,
+        "rq4": rq4,
         "events": events,
     }
 
@@ -437,6 +771,63 @@ def compare_runs(
             float(bool(previous_orientations & current_orientations))
         )
 
+    rq4_comparison: dict[str, Any] = {
+        "status": "not_available",
+        "reason": "both runs require objective RQ4 metrics",
+    }
+    if (
+        current.get("rq4", {}).get("status") == "ok"
+        and previous.get("rq4", {}).get("status") == "ok"
+    ):
+        current_local = {
+            (str(row["event_id"]), str(row["recipient"])): row
+            for row in current["rq4"]["events"]
+        }
+        previous_local = {
+            (str(row["event_id"]), str(row["recipient"])): row
+            for row in previous["rq4"]["events"]
+        }
+        shared_pairs = sorted(set(current_local) & set(previous_local))
+        agreement_by_event: dict[str, list[float]] = {}
+        mismatch_by_event: dict[str, list[float]] = {}
+        split_half_by_event: dict[str, list[float]] = {}
+        mismatch_patterns = {
+            "local_positive_team_negative",
+            "local_negative_team_positive",
+        }
+        for key in shared_pairs:
+            event_id, _recipient = key
+            curr = current_local[key]
+            prev = previous_local[key]
+            same_pattern = curr["pattern"] == prev["pattern"]
+            agreement_by_event.setdefault(event_id, []).append(float(same_pattern))
+            mismatch_by_event.setdefault(event_id, []).append(
+                float(same_pattern and curr["pattern"] in mismatch_patterns)
+            )
+            split_half_by_event.setdefault(event_id, []).append(
+                float(
+                    bool(curr["reproducible_mismatch"])
+                    and bool(prev["reproducible_mismatch"])
+                    and curr["pattern"] == prev["pattern"]
+                    and curr["pattern"] in mismatch_patterns
+                )
+            )
+
+        def event_means(values: Mapping[str, Sequence[float]]) -> list[float]:
+            return [_mean(values[event_id]) for event_id in sorted(values)]
+
+        rq4_comparison = {
+            "status": "ok",
+            "shared_event_recipient_pairs": len(shared_pairs),
+            "pattern_agreement": estimate(event_means(agreement_by_event)),
+            "cross_run_directional_mismatch_rate": estimate(
+                event_means(mismatch_by_event)
+            ),
+            "cross_run_split_half_reproducible_mismatch_rate": estimate(
+                event_means(split_half_by_event)
+            ),
+        }
+
     return {
         "shared_events": len(shared),
         "current_coverage": len(shared) / len(current_events),
@@ -468,6 +859,7 @@ def compare_runs(
                 reproducible_direction
             ),
         },
+        "rq4": rq4_comparison,
     }
 
 
@@ -736,13 +1128,24 @@ def _report(payload: Mapping[str, Any]) -> str:
     current = payload["current"]
     recipient = current["rq3"]["primary_team_score"]
     retest = payload.get("independent_retest")
+    benchmark = str(payload.get("benchmark", "PDDL"))
+    fever = benchmark.lower().startswith("fever")
+    primary_score_name = "Team Accuracy" if fever else "Team Score"
     lines = [
-        "# Native GMemory + MacNet causal audit",
+        f"# Native GMemory + MacNet {benchmark} causal audit",
         "",
         f"- Held-out task-memory events: {current['event_count']}",
         f"- Recipients: {', '.join(current['recipients'])}",
-        "- Primary outcome: `reward - cost_weight * steps / max_trials`",
-        "- Secondary outcome: raw PDDL success",
+        (
+            "- Primary outcome: exact FEVER binary-label accuracy"
+            if fever
+            else "- Primary outcome: `reward - cost_weight * steps / max_trials`"
+        ),
+        (
+            "- Task: offline closed-book `SUPPORTS` / `REFUTES` classification"
+            if fever
+            else "- Secondary outcome: raw PDDL success"
+        ),
         "",
         "## RQ2: Global selective-memory value",
         "",
@@ -750,37 +1153,46 @@ def _report(payload: Mapping[str, Any]) -> str:
     lines.extend(
         _report_policy_table(
             payload["rq2_policy_tables"]["team_score"],
-            score_name="Team Score",
-            percent_score=False,
+            score_name=primary_score_name,
+            percent_score=fever,
         )
     )
     lines.extend(
         [
             "",
-            "Team Score = task reward minus the configured step-cost penalty. "
-            "CIs are event-paired percentile-bootstrap intervals.",
+            (
+                "Team Accuracy is exact FEVER label correctness."
+                if fever
+                else "Team Score = task reward minus the configured step-cost penalty."
+            )
+            + " CIs are event-paired percentile-bootstrap intervals.",
             "Random is the exact expected score of a uniform selector at the "
             "same keep budget as Oracle; it requires no extra rollout.",
             "Cross-run Selective Drop applies each run's decisions to the other "
             "run. Oracle Selective Drop is a same-sample upper bound, not a "
             "deployable policy.",
-            "",
-            "### Success-rate sensitivity",
-            "",
         ]
     )
-    lines.extend(
-        _report_policy_table(
-            payload["rq2_policy_tables"]["success"],
-            score_name="Success Rate",
-            percent_score=True,
+    if not fever:
+        lines.extend(["", "### Success-rate sensitivity", ""])
+        lines.extend(
+            _report_policy_table(
+                payload["rq2_policy_tables"]["success"],
+                score_name="Success Rate",
+                percent_score=True,
+            )
         )
-    )
     lines.extend(
         [
             "",
             "## RQ3: Recipient heterogeneity",
             "",
+            "- Intervention: "
+            + (
+                "isolated recipient exposure minus shared global-drop control"
+                if recipient.get("recipient_intervention") == "isolated_exposure"
+                else "all-agents exposure minus one-recipient drop"
+            ),
             "- Direct positive/negative recipient sign-flip rate: "
             + _fmt(recipient["direct_sign_flip_rate"], percent=True),
             "- Any recipient sign heterogeneity rate: "
@@ -797,6 +1209,83 @@ def _report(payload: Mapping[str, Any]) -> str:
         lines.append(
             f"| {name} | {_fmt(row['mean_utility'])} | {row['positive_events']} | "
             f"{row['neutral_events']} | {row['negative_events']} |"
+        )
+    if recipient.get("split_half_reproducible_sign_flip_rate") is not None:
+        lines.extend(
+            [
+                "",
+                "- Split-half reproducible recipient sign-flip rate: "
+                + _fmt(
+                    recipient["split_half_reproducible_sign_flip_rate"],
+                    percent=True,
+                ),
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "- Split-half reproducibility: unavailable (at least four paired repeats required).",
+            ]
+        )
+
+    rq4 = current.get("rq4", {})
+    lines.extend(["", "## RQ4: Objective local-to-team gap", ""])
+    if rq4.get("status") != "ok":
+        lines.append("Not available: " + str(rq4.get("reason", rq4.get("status"))))
+    else:
+        lines.extend(
+            [
+                f"- Local metric: {rq4['local_metric']}",
+                f"- Team metric: {rq4['team_metric']}",
+                "- Intervention: isolated exposure minus the same global-drop control",
+                "- Local/team sign-mismatch rate: "
+                + _fmt(rq4["local_team_mismatch_rate"], percent=True),
+            ]
+        )
+        stable = rq4.get("reproducible_local_team_mismatch_rate")
+        lines.append(
+            "- Split-half reproducible local/team mismatch rate: "
+            + (
+                _fmt(stable, percent=True)
+                if stable is not None
+                else "unavailable (at least four paired repeats required)"
+            )
+        )
+        correlation = rq4["local_team_utility_correlation"]
+        lines.append(
+            "- Local/team utility correlation: "
+            + (
+                _fmt(correlation)
+                if correlation.get("status") == "ok"
+                else str(correlation.get("status"))
+            )
+        )
+        lines.extend(
+            [
+                "",
+                "| Utility pattern | Event-clustered fraction [CI] |",
+                "|---|---:|",
+            ]
+        )
+        pattern_labels = {
+            "local_positive_team_positive": "Local +, Team +",
+            "local_positive_team_negative": "Local +, Team -",
+            "local_negative_team_positive": "Local -, Team +",
+            "local_negative_team_negative": "Local -, Team -",
+            "neutral_involved": "Neutral involved",
+        }
+        for key, label in pattern_labels.items():
+            lines.append(
+                f"| {label} | {_fmt(rq4['pattern_rates'][key], percent=True)} |"
+            )
+        lines.extend(
+            [
+                "",
+                "The local metric scores predicted Wikipedia page titles against "
+                "alternative gold FEVER evidence-page sets; it does not claim "
+                "sentence-level evidence retrieval.",
+            ]
         )
     lines.extend(["", "## Independent retest", ""])
     if retest is None:
@@ -830,6 +1319,25 @@ def _report(payload: Mapping[str, Any]) -> str:
                 ),
             ]
         )
+        if retest.get("rq4", {}).get("status") == "ok":
+            lines.extend(
+                [
+                    "- RQ4 local/team pattern agreement: "
+                    + _fmt(retest["rq4"]["pattern_agreement"], percent=True),
+                    "- RQ4 cross-run directional mismatch rate: "
+                    + _fmt(
+                        retest["rq4"]["cross_run_directional_mismatch_rate"],
+                        percent=True,
+                    ),
+                    "- RQ4 cross-run + split-half reproducible mismatch rate: "
+                    + _fmt(
+                        retest["rq4"][
+                            "cross_run_split_half_reproducible_mismatch_rate"
+                        ],
+                        percent=True,
+                    ),
+                ]
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -862,6 +1370,39 @@ def _write_matrix(path: Path, analysis: Mapping[str, Any]) -> None:
                 utility_range=diagnostic["utility_range"],
             )
             writer.writerow(row)
+
+
+def _write_rq4_matrix(path: Path, analysis: Mapping[str, Any]) -> None:
+    rq4 = analysis.get("rq4", {})
+    fields = [
+        "event_id",
+        "task_id",
+        "candidate_id",
+        "recipient",
+        "local_utility",
+        "team_utility",
+        "local_sign",
+        "team_sign",
+        "pattern",
+        "split_half_patterns",
+        "reproducible_mismatch",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        if rq4.get("status") != "ok":
+            return
+        for event in rq4["events"]:
+            writer.writerow(
+                {
+                    key: (
+                        json.dumps(event[key], ensure_ascii=False)
+                        if key == "split_half_patterns"
+                        else event[key]
+                    )
+                    for key in fields
+                }
+            )
 
 
 def _write_policy_table(path: Path, table: Mapping[str, Any]) -> None:
@@ -920,6 +1461,7 @@ def write_analysis(
     )
     payload: dict[str, Any] = {
         "analysis_schema": ANALYSIS_SCHEMA,
+        "benchmark": manifest.get("design", {}).get("benchmark", "PDDL"),
         "design_hash": manifest["design_hash"],
         "current_results": str(results_dir),
         "current": current,
@@ -986,6 +1528,7 @@ def write_analysis(
     output = results_dir / "oracle_recipient_analysis.json"
     output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     _write_matrix(results_dir / "recipient_matrix.csv", current)
+    _write_rq4_matrix(results_dir / "rq4_local_team_matrix.csv", current)
     _write_policy_table(
         results_dir / "rq2_team_score_policy_table.csv",
         payload["rq2_policy_tables"]["team_score"],
