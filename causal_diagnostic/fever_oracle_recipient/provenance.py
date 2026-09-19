@@ -7,7 +7,7 @@ import json
 from typing import Any, Mapping
 
 
-SNAPSHOT_SCHEMA = "native-gmemory-macnet-fever-evidence-snapshot-v2"
+SNAPSHOT_SCHEMA = "native-gmemory-macnet-fever-evidence-snapshot-v3"
 
 
 class SnapshotProvenanceError(ValueError):

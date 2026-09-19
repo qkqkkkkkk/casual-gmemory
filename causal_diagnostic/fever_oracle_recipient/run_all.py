@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-ORCHESTRATOR_SCHEMA = "native-gmemory-macnet-fever-pipeline-v1"
+ORCHESTRATOR_SCHEMA = "native-gmemory-macnet-fever-pipeline-v2"
 
 
 class StageFailure(RuntimeError):
@@ -49,7 +49,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=Path(
             "causal_diagnostic/memory_snapshots/"
-            "fever_evidence_support50_7b_v2/g-memory"
+            "fever_evidence_support50_7b_v3/g-memory"
         ),
     )
     parser.add_argument(
@@ -57,7 +57,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=Path(
             "causal_diagnostic/results/"
-            "native_fever_rq234_pilot_7b_v2"
+            "native_fever_rq234_pilot_7b_v3"
         ),
     )
     parser.add_argument("--support-per-label", type=int, default=25)

@@ -47,13 +47,20 @@ def _message_id(message: MASMessage) -> str:
 def candidate_metadata(frozen: Any, kind: str, index: int) -> dict[str, Any]:
     if kind == "trajectory":
         candidate = frozen.successful[index]
+        extra = (
+            candidate.extra_fields
+            if isinstance(candidate.extra_fields, dict)
+            else {}
+        )
         return {
             "kind": kind,
             "index": index,
             "candidate_id": f"trajectory-{_message_id(candidate)}",
             "task_main": candidate.task_main,
+            "task_description": candidate.task_description,
             "label": candidate.label,
             "trajectory": candidate.task_trajectory,
+            "key_steps": extra.get("key_steps"),
         }
     if kind == "insight":
         candidate = frozen.insights[index]
@@ -65,4 +72,3 @@ def candidate_metadata(frozen: Any, kind: str, index: int) -> dict[str, Any]:
             "text": candidate,
         }
     raise ValueError(f"unsupported candidate kind: {kind}")
-

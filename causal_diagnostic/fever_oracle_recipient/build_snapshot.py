@@ -23,10 +23,11 @@ def _early_cli_value(flag: str) -> str | None:
 
 
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-os.environ.setdefault(
-    "OPENAI_API_BASE",
-    _early_cli_value("--endpoint") or "http://127.0.0.1:11434/v1",
-)
+_CLI_ENDPOINT = _early_cli_value("--endpoint")
+if _CLI_ENDPOINT:
+    os.environ["OPENAI_API_BASE"] = _CLI_ENDPOINT
+else:
+    os.environ.setdefault("OPENAI_API_BASE", "http://127.0.0.1:11434/v1")
 os.environ.setdefault("OPENAI_API_KEY", "EMPTY")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -44,6 +45,9 @@ from causal_diagnostic.fever_oracle_recipient.provenance import SNAPSHOT_SCHEMA
 from causal_diagnostic.fever_oracle_recipient.prompts import (
     FEVER_SYSTEM_PROMPT,
     prepare_example,
+)
+from causal_diagnostic.fever_oracle_recipient.sampling import (
+    configure_fever_sampling,
 )
 from causal_diagnostic.fever_oracle_recipient.utils import seed_everything
 from causal_diagnostic.oracle_recipient.seeded_client import SeededCachedChat
@@ -120,11 +124,6 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-
-
-def _set_temperature(mas: Any, value: float) -> None:
-    for node in (*mas._agent_nodes.values(), mas._decision_node):
-        node.reasoning_config.temperature = float(value)
 
 
 def _design(args: argparse.Namespace, source_md5: str, support: list[dict[str, Any]], evaluation: list[dict[str, Any]]) -> dict[str, Any]:
@@ -253,7 +252,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
             "use_projector": False,
         },
     )
-    _set_temperature(mas, args.temperature)
+    configure_fever_sampling(mas, args.temperature)
     for agent in mas.agents_team.values():
         agent.add_task_instruction(FEVER_SYSTEM_PROMPT)
     mas._decision_node._agent.add_task_instruction(FEVER_SYSTEM_PROMPT)
@@ -300,6 +299,11 @@ def main(argv: Sequence[str] | None = None) -> Path:
                 "reward": float(reward),
                 "success": bool(done),
                 "steps": int(env.infos["steps"]),
+                "decision_raw_output": (
+                    mas._decision_node.current_output[0]
+                    if mas._decision_node.current_output
+                    else None
+                ),
                 "memory_size_after": after,
                 "llm_calls": client.calls - calls_before,
                 "cache_hits": client.cache_hits - hits_before,

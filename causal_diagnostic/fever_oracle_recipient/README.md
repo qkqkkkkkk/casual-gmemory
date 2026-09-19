@@ -20,6 +20,11 @@ GMemory repository:
   worker's `Evidence[...]` output;
 - no online Wikipedia and no new retrieval inside matched branches.
 
+Do not reuse the earlier `fever_evidence_support50_7b_v2` snapshot or its LLM
+cache. Native MacNet's newline stop truncated the required second-line
+`Finish[...]` label in that version. The v3 snapshot disables that stop for
+this two-line FEVER protocol and uses a separate directory and cache.
+
 ## Recommended: run everything with one resumable command
 
 From the repository root, this one command builds the frozen snapshot, runs a
@@ -52,7 +57,7 @@ rerun the **identical command**. It automatically:
 Progress and errors are persisted under:
 
 ```text
-causal_diagnostic/results/native_fever_rq234_pilot_7b_v2/
+causal_diagnostic/results/native_fever_rq234_pilot_7b_v3/
 ├── experiment_progress.json
 ├── logs/
 │   ├── snapshot.log
@@ -91,7 +96,7 @@ python -m causal_diagnostic.fever_oracle_recipient.build_snapshot \
   --model qwen2.5:7b \
   --graph-type Chain \
   --node-num 3 \
-  --output-memory-dir causal_diagnostic/memory_snapshots/fever_evidence_support50_7b_v2/g-memory
+  --output-memory-dir causal_diagnostic/memory_snapshots/fever_evidence_support50_7b_v3/g-memory
 ```
 
 If interrupted, rerun the identical command with `--resume`. Resume is fail
@@ -105,7 +110,7 @@ Before evaluation, inspect:
 python - <<'PY'
 import json
 from pathlib import Path
-p = Path("causal_diagnostic/memory_snapshots/fever_evidence_support50_7b_v2/g-memory/causal_snapshot_manifest.json")
+p = Path("causal_diagnostic/memory_snapshots/fever_evidence_support50_7b_v3/g-memory/causal_snapshot_manifest.json")
 m = json.loads(p.read_text())
 print({k: m[k] for k in ("memory_records", "successful_total", "failed_total")})
 print("support/eval overlap:", len(set(m["support_ids"]) & set(m["evaluation_ids"])))
@@ -123,7 +128,7 @@ both classes.
 python -m causal_diagnostic.fever_oracle_recipient.run_experiment \
   --test data/fever/fever_dev.jsonl \
   --claims 4 \
-  --memory-dir causal_diagnostic/memory_snapshots/fever_evidence_support50_7b_v2/g-memory \
+  --memory-dir causal_diagnostic/memory_snapshots/fever_evidence_support50_7b_v3/g-memory \
   --endpoint http://127.0.0.1:11436/v1 \
   --model qwen2.5:7b \
   --graph-type Chain \
@@ -131,7 +136,7 @@ python -m causal_diagnostic.fever_oracle_recipient.run_experiment \
   --isolated-recipients solver_0,solver_2 \
   --temperature 0.7 \
   --sample-seed-base 0 \
-  --output-dir causal_diagnostic/results/native_fever_rq234_pilot_7b_v2/smoke_seed0
+  --output-dir causal_diagnostic/results/native_fever_rq234_pilot_7b_v3/smoke_seed0
 ```
 
 Check `collection_diagnostics.json`; `excluded_claims` should normally be
@@ -146,7 +151,7 @@ Seed 0:
 python -m causal_diagnostic.fever_oracle_recipient.run_experiment \
   --test data/fever/fever_dev.jsonl \
   --claims 40 \
-  --memory-dir causal_diagnostic/memory_snapshots/fever_evidence_support50_7b_v2/g-memory \
+  --memory-dir causal_diagnostic/memory_snapshots/fever_evidence_support50_7b_v3/g-memory \
   --endpoint http://127.0.0.1:11436/v1 \
   --model qwen2.5:7b \
   --graph-type Chain \
@@ -155,7 +160,7 @@ python -m causal_diagnostic.fever_oracle_recipient.run_experiment \
   --temperature 0.7 \
   --repeats 6 \
   --sample-seed-base 0 \
-  --output-dir causal_diagnostic/results/native_fever_rq234_pilot_7b_v2/seed0
+  --output-dir causal_diagnostic/results/native_fever_rq234_pilot_7b_v3/seed0
 ```
 
 Independent seed 1000, using the exact same frozen snapshot:
@@ -164,7 +169,7 @@ Independent seed 1000, using the exact same frozen snapshot:
 python -m causal_diagnostic.fever_oracle_recipient.run_experiment \
   --test data/fever/fever_dev.jsonl \
   --claims 40 \
-  --memory-dir causal_diagnostic/memory_snapshots/fever_evidence_support50_7b_v2/g-memory \
+  --memory-dir causal_diagnostic/memory_snapshots/fever_evidence_support50_7b_v3/g-memory \
   --endpoint http://127.0.0.1:11436/v1 \
   --model qwen2.5:7b \
   --graph-type Chain \
@@ -173,8 +178,8 @@ python -m causal_diagnostic.fever_oracle_recipient.run_experiment \
   --temperature 0.7 \
   --repeats 6 \
   --sample-seed-base 1000 \
-  --retest-results causal_diagnostic/results/native_fever_rq234_pilot_7b_v2/seed0 \
-  --output-dir causal_diagnostic/results/native_fever_rq234_pilot_7b_v2/seed1000_retest
+  --retest-results causal_diagnostic/results/native_fever_rq234_pilot_7b_v3/seed0 \
+  --output-dir causal_diagnostic/results/native_fever_rq234_pilot_7b_v3/seed1000_retest
 ```
 
 Add `--resume` to the same command after an interruption. Never seed the

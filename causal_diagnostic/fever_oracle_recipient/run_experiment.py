@@ -26,10 +26,11 @@ def _early_cli_value(flag: str) -> str | None:
 
 
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-os.environ.setdefault(
-    "OPENAI_API_BASE",
-    _early_cli_value("--endpoint") or "http://127.0.0.1:11434/v1",
-)
+_CLI_ENDPOINT = _early_cli_value("--endpoint")
+if _CLI_ENDPOINT:
+    os.environ["OPENAI_API_BASE"] = _CLI_ENDPOINT
+else:
+    os.environ.setdefault("OPENAI_API_BASE", "http://127.0.0.1:11434/v1")
 os.environ.setdefault("OPENAI_API_KEY", "EMPTY")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -46,6 +47,9 @@ from causal_diagnostic.fever_oracle_recipient.local_metric import score_evidence
 from causal_diagnostic.fever_oracle_recipient.provenance import (
     SnapshotProvenanceError,
     validate_snapshot_manifest,
+)
+from causal_diagnostic.fever_oracle_recipient.sampling import (
+    configure_fever_sampling,
 )
 from causal_diagnostic.fever_oracle_recipient.prompts import (
     FEVER_SYSTEM_PROMPT,
@@ -68,7 +72,7 @@ from mas.reasoning import ReasoningIO
 from mas.utils import EmbeddingFunc
 
 
-RUNNER_SCHEMA = "native-gmemory-macnet-fever-rq234-v2"
+RUNNER_SCHEMA = "native-gmemory-macnet-fever-rq234-v3"
 _ACTIVE_PROGRESS_PATH: Path | None = None
 _ACTIVE_PROGRESS: dict[str, Any] = {}
 
@@ -385,7 +389,7 @@ def _run_branch(
             f"MacNet recipient mismatch: expected {recipients}, got {actual_recipients}"
         )
     mas.set_memory_policy(_policy(condition, recipients, args))
-    mas.set_sampling_temperature(args.temperature)
+    configure_fever_sampling(mas, args.temperature)
     for agent in mas.agents_team.values():
         agent.add_task_instruction(FEVER_SYSTEM_PROMPT)
     mas._decision_node._agent.add_task_instruction(FEVER_SYSTEM_PROMPT)
@@ -662,6 +666,8 @@ def main(argv: Sequence[str] | None = None) -> Path:
                     "task": {
                         "claim_id": claim_id,
                         "claim": task["claim"],
+                        "task_main": task["task_main"],
+                        "task_description": task["task_description"],
                         "gold_label": task["label"],
                         # Persisted after inference for objective-metric audit.
                         # The prompt builders never expose this field.
