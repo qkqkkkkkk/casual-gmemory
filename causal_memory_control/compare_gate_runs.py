@@ -10,6 +10,9 @@ import random
 from typing import Any, Mapping, Sequence
 
 
+PHYSICAL_AUDIT_FIELDS = frozenset({"memory_sha256"})
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", type=Path, required=True)
@@ -37,6 +40,15 @@ def _load(path: Path) -> dict[str, Mapping[str, Any]]:
 
 def _mean(values: Sequence[float]) -> float:
     return sum(values) / len(values) if values else 0.0
+
+
+def _semantic_run_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop byte-level Chroma audit fields while retaining experiment identity."""
+    return {
+        key: item
+        for key, item in value.items()
+        if key not in PHYSICAL_AUDIT_FIELDS
+    }
 
 
 def _paired_interval(
@@ -77,8 +89,12 @@ def compare(
     if not task_ids:
         raise ValueError("the two logs have no paired task IDs")
     for task_id in task_ids:
-        baseline_metadata = baseline[task_id].get("run_metadata", {})
-        gate_metadata = gate[task_id].get("run_metadata", {})
+        baseline_metadata = _semantic_run_metadata(
+            baseline[task_id].get("run_metadata", {})
+        )
+        gate_metadata = _semantic_run_metadata(
+            gate[task_id].get("run_metadata", {})
+        )
         if baseline_metadata != gate_metadata:
             raise ValueError(
                 f"run metadata differs for paired task {task_id}: "

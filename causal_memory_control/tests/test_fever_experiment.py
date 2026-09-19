@@ -63,6 +63,21 @@ class CheckpointValidationTests(unittest.TestCase):
                 candidate_kinds=("trajectory",),
             )
 
+    def test_physical_chroma_hash_drift_is_not_a_semantic_mismatch(self) -> None:
+        payload = json.loads(json.dumps(self.payload))
+        payload["training_metadata"]["training_contexts"][0][
+            "memory_sha256"
+        ] = "hash-before-opening-chroma"
+        fever_experiment.validate_checkpoint_for_fever(
+            payload,
+            evaluation_ids=[3, 4],
+            expected_context={
+                **self.context,
+                "memory_sha256": "hash-after-opening-chroma",
+            },
+            candidate_kinds=("trajectory",),
+        )
+
     def test_missing_training_ids_is_rejected(self) -> None:
         payload = {
             "schema": CHECKPOINT_SCHEMA,
@@ -253,6 +268,14 @@ class FeverRunnerTests(unittest.TestCase):
             )
             self.assertEqual(summary["completion_rate"], 1.0)
 
+            # Opening persistent Chroma can rewrite SQLite bytes without
+            # changing any logical record.  Such drift must not break resume.
+            (memory / "chroma-byte-drift.sqlite3").write_bytes(b"physical drift")
+            with patches[0], patches[1], patches[2], patches[3], patches[4]:
+                resumed_after_drift = fever_experiment.main((*argv, "--resume"))
+            self.assertEqual(resumed_after_drift, log_path)
+            self.assertEqual(_FakeMacNet.schedule_count, 2)
+
     def test_learned_runner_loads_checkpoint_and_drops_in_scope_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -301,6 +324,9 @@ class FeverRunnerTests(unittest.TestCase):
                     "training_contexts": [context],
                 },
             )
+            # Reproduce the production failure: checkpoint provenance was
+            # captured before a read-only Chroma open changed physical bytes.
+            (memory / "post-training-chroma-drift.sqlite3").write_bytes(b"drift")
             output = root / "learned"
             argv = (
                 "--data",

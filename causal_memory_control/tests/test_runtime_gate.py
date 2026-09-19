@@ -361,6 +361,47 @@ class ComparisonTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "run metadata differs"):
                 compare(baseline, gate, bootstrap_samples=10)
 
+    def test_physical_memory_hash_drift_is_ignored_for_paired_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = Path(directory) / "baseline.jsonl"
+            gate = Path(directory) / "gate.jsonl"
+            common = {"model": "same", "snapshot_design_hash": "registered"}
+            baseline.write_text(
+                json.dumps(
+                    {
+                        "task_id": 1,
+                        "reward": 0,
+                        "done": False,
+                        "run_metadata": {
+                            **common,
+                            "memory_sha256": "before-chroma-open",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            gate.write_text(
+                json.dumps(
+                    {
+                        "task_id": 1,
+                        "reward": 1,
+                        "done": True,
+                        "run_metadata": {
+                            **common,
+                            "memory_sha256": "after-chroma-open",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = compare(baseline, gate, bootstrap_samples=10)
+
+        self.assertEqual(result["paired_tasks"], 1)
+        self.assertEqual(result["completion_rate_delta"], 1.0)
+
     def test_incomplete_pairing_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             baseline = Path(directory) / "baseline.jsonl"

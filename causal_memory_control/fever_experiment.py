@@ -30,6 +30,7 @@ from causal_diagnostic.fever_oracle_recipient.prompts import (
 )
 from causal_diagnostic.fever_oracle_recipient.provenance import (
     SnapshotProvenanceError,
+    reconcile_retest_design,
     validate_snapshot_manifest,
 )
 from causal_diagnostic.fever_oracle_recipient.sampling import (
@@ -42,6 +43,7 @@ from causal_memory_control.runtime_gate import (
 
 
 RUNNER_SCHEMA = "gmemory-team-exposure-fever-evaluation-v1"
+PHYSICAL_MEMORY_CONTEXT_FIELDS = frozenset({"memory_sha256"})
 
 # Loaded only for an actual run. Keeping the validation/data helpers light makes
 # provenance and leakage checks runnable without the full GMemory dependency set.
@@ -312,18 +314,45 @@ def validate_checkpoint_for_fever(
     for index, context in enumerate(contexts):
         if not isinstance(context, Mapping):
             raise ValueError(f"checkpoint training context {index} is invalid")
-        missing = set(expected_context) - set(context)
+        required_context = set(expected_context) - PHYSICAL_MEMORY_CONTEXT_FIELDS
+        missing = required_context - set(context)
         if missing:
             raise ValueError(
                 f"checkpoint training context {index} is missing compatibility "
                 f"fields: {sorted(missing)}"
             )
         for key, expected in expected_context.items():
+            if key in PHYSICAL_MEMORY_CONTEXT_FIELDS:
+                continue
             if context[key] != expected:
                 raise ValueError(
                     f"checkpoint training context {key}={context[key]!r}, "
                     f"but FEVER evaluation requires {expected!r}"
                 )
+
+
+def _align_resume_design(
+    args: argparse.Namespace,
+    design: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Reuse the registered physical hash while checking all semantic fields.
+
+    Persistent Chroma may rewrite SQLite bytes merely by opening a collection.
+    The byte-level directory hash remains useful for audit, but it cannot be a
+    cross-process identity or resume key.  A resume therefore inherits only
+    that volatile field from its original manifest and still fails closed on
+    every semantic setting.
+    """
+    if not args.resume:
+        return dict(design)
+    manifest_path = args.output_dir / "run_manifest.json"
+    if not manifest_path.is_file():
+        return dict(design)
+    previous_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    try:
+        return reconcile_retest_design(design, previous_manifest)
+    except SnapshotProvenanceError as exc:
+        raise SystemExit(f"resume design is incompatible: {exc}") from exc
 
 
 def _prepare_output(
@@ -436,6 +465,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
         "threshold": args.threshold,
         "candidate_kinds": list(args.candidate_kinds),
     }
+    design = _align_resume_design(args, design)
 
     checkpoint_payload: dict[str, Any] | None = None
     checkpoint_hash: str | None = None

@@ -496,6 +496,17 @@ def main(argv: Sequence[str] | None = None) -> Path:
         except SnapshotProvenanceError as exc:
             raise SystemExit(str(exc)) from exc
 
+    if args.resume:
+        resume_manifest_path = args.output_dir / "run_manifest.json"
+        if resume_manifest_path.is_file():
+            resume_manifest = json.loads(
+                resume_manifest_path.read_text(encoding="utf-8")
+            )
+            try:
+                design = reconcile_retest_design(design, resume_manifest)
+            except SnapshotProvenanceError as exc:
+                raise SystemExit(f"resume design is incompatible: {exc}") from exc
+
     run = {
         **design,
         "endpoint": args.endpoint or os.environ.get("OPENAI_API_BASE"),
