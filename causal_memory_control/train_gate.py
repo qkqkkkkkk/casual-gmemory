@@ -144,6 +144,7 @@ def _examples_from_branches(
     groups: dict[tuple[Any, str], dict[str, list[Mapping[str, Any]]]] = defaultdict(
         lambda: defaultdict(list)
     )
+    observed_candidates: dict[Any, dict[str, MemoryCandidate]] = defaultdict(dict)
     for row in rows:
         task_id = row.get("task_id")
         if task_ids is not None and int(task_id) not in task_ids:
@@ -153,6 +154,7 @@ def _examples_from_branches(
         if not candidate_id:
             raise ValueError("branch row is missing candidate.candidate_id")
         groups[(task_id, candidate_id)][str(row.get("condition"))].append(row)
+        observed_candidates[task_id][candidate_id] = _candidate(candidate)
 
     feature_builder = TeamExposureFeatureBuilder(HashEmbedder(hash_dimensions))
     examples = []
@@ -176,7 +178,11 @@ def _examples_from_branches(
             query=query,
             task_state=str(first.get("task", {}).get("task_description", query)),
             memory=candidate,
-            candidate_set=_candidate_set(first, candidate),
+            candidate_set=_candidate_set(
+                first,
+                candidate,
+                observed=tuple(observed_candidates[task_id].values()),
+            ),
             exposure_agent_ids=tuple(
                 f"host-recipient-{index}" for index in range(exposure_count)
             ),
@@ -241,23 +247,32 @@ def _query(task: Mapping[str, Any]) -> str:
 
 
 def _candidate_set(
-    row: Mapping[str, Any], target: MemoryCandidate
+    row: Mapping[str, Any],
+    target: MemoryCandidate,
+    *,
+    observed: Sequence[MemoryCandidate] = (),
 ) -> tuple[MemoryCandidate, ...]:
-    """Preserve observed candidate-set size when peer payloads were not logged."""
+    """Use logged peers when available and preserve the full retrieved size."""
     sizes = row.get("retrieval_sizes", {})
     total = int(sizes.get("successful_trajectories", 0)) + int(
         sizes.get("insights", 0)
     )
     total = max(total, 1)
+    unique_observed = {
+        candidate.memory_id: candidate
+        for candidate in observed
+        if candidate.memory_id != target.memory_id
+    }
+    peers_with_payload = tuple(unique_observed.values())[: max(0, total - 1)]
     peers = tuple(
         MemoryCandidate(
             memory_id=f"unobserved-peer-{index}",
             memory_type="unobserved",
             content="",
         )
-        for index in range(total - 1)
+        for index in range(max(0, total - 1 - len(peers_with_payload)))
     )
-    return (target, *peers)
+    return (target, *peers_with_payload, *peers)
 
 
 def _task_metadata(task: Mapping[str, Any]) -> dict[str, Any]:
@@ -374,6 +389,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
             "training_task_ids": recorded_task_ids,
             "candidate_kinds": _candidate_kinds(examples),
             "candidate_ranks": _candidate_ranks(examples),
+            "candidate_kind_ranks": _candidate_kind_ranks(examples),
             "training_contexts": _training_contexts(args.input),
         },
     )
@@ -424,6 +440,23 @@ def _candidate_ranks(examples: Sequence[PotentialOutcomeExample]) -> list[int]:
             and float(example.features.get("retrieval_rank", 0.0)) >= 1.0
         }
     )
+
+
+def _candidate_kind_ranks(
+    examples: Sequence[PotentialOutcomeExample],
+) -> dict[str, list[int]]:
+    prefix = "memory_type::"
+    pairs: dict[str, set[int]] = defaultdict(set)
+    for example in examples:
+        if float(example.features.get("retrieval_rank_missing", 0.0)) != 0.0:
+            continue
+        rank = int(example.features.get("retrieval_rank", 0.0))
+        if rank < 1:
+            continue
+        for feature_name, value in example.features.items():
+            if feature_name.startswith(prefix) and float(value) > 0:
+                pairs[feature_name.removeprefix(prefix)].add(rank)
+    return {kind: sorted(ranks) for kind, ranks in sorted(pairs.items())}
 
 
 def _training_task_ids(sources: Sequence[Path]) -> list[int]:

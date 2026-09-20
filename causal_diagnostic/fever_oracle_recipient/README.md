@@ -33,15 +33,25 @@ seed-1000 retest and combined analysis:
 
 ```bash
 python -u -m causal_diagnostic.fever_oracle_recipient.run_all \
-  --endpoint http://127.0.0.1:11436/v1
+  --endpoint http://127.0.0.1:11436/v1 \
+  --all-candidates \
+  --results-root causal_diagnostic/results/native_fever_all_candidates_7b_v4
 ```
+
+`--all-candidates` collects a separate matched intervention event for every
+returned successful trajectory and insight rank. With the default retrieval
+settings this covers trajectory ranks 1–3 and insight ranks 1–3. Use a new
+results root as shown above; the older v3 result contains only the selected
+Top-1 trajectory event and cannot train the expanded gate.
 
 The command has three live progress levels:
 
 - overall stage progress (`snapshot`, `smoke`, `seed0`, `seed1000_retest`);
 - support-memory progress by claim;
-- intervention progress by persisted branch. The default pilot has four
-  branches per event and six paired repeats: 960 persisted branches per seed.
+- intervention progress by persisted branch. The all-candidate pilot has four
+  conditions per event and six paired repeats: at most 5760 persisted branches
+  per seed (`40 × 6 candidates × 6 repeats × 4 conditions`). A configured rank
+  that is absent from a claim's actual retrieval is recorded as an exclusion.
 
 If the process, SSH session, model server, or scheduler interrupts the run,
 rerun the **identical command**. It automatically:
@@ -57,7 +67,7 @@ rerun the **identical command**. It automatically:
 Progress and errors are persisted under:
 
 ```text
-causal_diagnostic/results/native_fever_rq234_pilot_7b_v3/
+causal_diagnostic/results/native_fever_all_candidates_7b_v4/
 ├── experiment_progress.json
 ├── logs/
 │   ├── snapshot.log
@@ -136,7 +146,8 @@ python -m causal_diagnostic.fever_oracle_recipient.run_experiment \
   --isolated-recipients solver_0,solver_2 \
   --temperature 0.7 \
   --sample-seed-base 0 \
-  --output-dir causal_diagnostic/results/native_fever_rq234_pilot_7b_v3/smoke_seed0
+  --all-candidates \
+  --output-dir causal_diagnostic/results/native_fever_all_candidates_7b_v4/smoke_seed0
 ```
 
 Check `collection_diagnostics.json`; `excluded_claims` should normally be
@@ -160,7 +171,8 @@ python -m causal_diagnostic.fever_oracle_recipient.run_experiment \
   --temperature 0.7 \
   --repeats 6 \
   --sample-seed-base 0 \
-  --output-dir causal_diagnostic/results/native_fever_rq234_pilot_7b_v3/seed0
+  --all-candidates \
+  --output-dir causal_diagnostic/results/native_fever_all_candidates_7b_v4/seed0
 ```
 
 Independent seed 1000, using the exact same frozen snapshot:
@@ -178,8 +190,9 @@ python -m causal_diagnostic.fever_oracle_recipient.run_experiment \
   --temperature 0.7 \
   --repeats 6 \
   --sample-seed-base 1000 \
-  --retest-results causal_diagnostic/results/native_fever_rq234_pilot_7b_v3/seed0 \
-  --output-dir causal_diagnostic/results/native_fever_rq234_pilot_7b_v3/seed1000_retest
+  --all-candidates \
+  --retest-results causal_diagnostic/results/native_fever_all_candidates_7b_v4/seed0 \
+  --output-dir causal_diagnostic/results/native_fever_all_candidates_7b_v4/seed1000_retest
 ```
 
 Add `--resume` to the same command after an interruption. Never seed the

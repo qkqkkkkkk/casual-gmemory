@@ -88,8 +88,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--embedding-model", default="sentence-transformers/all-MiniLM-L6-v2"
     )
-    parser.add_argument("--candidate-kind", choices=("trajectory", "insight"), default="trajectory")
+    parser.add_argument(
+        "--candidate-kind",
+        choices=("trajectory", "insight"),
+        default="trajectory",
+    )
     parser.add_argument("--candidate-index", type=int, default=0)
+    parser.add_argument(
+        "--all-candidates",
+        action="store_true",
+        help=(
+            "Collect matched counterfactuals for every retrieved successful "
+            "trajectory and insight"
+        ),
+    )
     parser.add_argument("--delta", type=float, default=0.0)
     parser.add_argument("--bootstrap-samples", type=int, default=10_000)
     parser.add_argument("--confidence-level", type=float, default=0.95)
@@ -110,8 +122,48 @@ def _validate_args(args: argparse.Namespace) -> None:
         )
     if args.node_num < 2:
         raise SystemExit("--node-num must be at least 2")
+    if args.candidate_index < 0:
+        raise SystemExit("--candidate-index must be non-negative")
+    if min(args.successful_topk, args.failed_topk, args.insights_topk) < 0:
+        raise SystemExit("retrieval top-k values must be non-negative")
+    if args.all_candidates and args.successful_topk + args.insights_topk < 1:
+        raise SystemExit(
+            "--all-candidates requires --successful-topk or --insights-topk > 0"
+        )
     if args.temperature < 0:
         raise SystemExit("--temperature must be non-negative")
+
+
+def _candidate_specs(args: argparse.Namespace) -> list[dict[str, Any]]:
+    if not args.all_candidates:
+        return [
+            {
+                "kind": str(args.candidate_kind),
+                "index": int(args.candidate_index),
+            }
+        ]
+    return [
+        *(
+            {"kind": "trajectory", "index": index}
+            for index in range(int(args.successful_topk))
+        ),
+        *(
+            {"kind": "insight", "index": index}
+            for index in range(int(args.insights_topk))
+        ),
+    ]
+
+
+def _candidate_design(args: argparse.Namespace) -> dict[str, Any]:
+    if args.all_candidates:
+        return {
+            "candidate_scope": "all_retrieved",
+            "candidate_specs": _candidate_specs(args),
+        }
+    return {
+        "candidate_kind": str(args.candidate_kind),
+        "candidate_index": int(args.candidate_index),
+    }
 
 
 def _timestamp() -> str:
@@ -209,8 +261,7 @@ def _validate_completed_run(
         {
             "memory_dir": str(args.memory_dir),
             "model": args.model,
-            "candidate_kind": args.candidate_kind,
-            "candidate_index": args.candidate_index,
+            **_candidate_design(args),
             "repeats": repeats,
             "temperature": args.temperature,
             "node_num": args.node_num,
@@ -346,8 +397,10 @@ def _run_command(stage: str, command: Sequence[str], log_path: Path) -> None:
         )
 
 
-def _base_runner_command(args: argparse.Namespace, claims: int, output: Path) -> list[str]:
-    return [
+def _base_runner_command(
+    args: argparse.Namespace, claims: int, output: Path
+) -> list[str]:
+    command = [
         sys.executable,
         "-m",
         "causal_diagnostic.fever_oracle_recipient.run_experiment",
@@ -394,6 +447,9 @@ def _base_runner_command(args: argparse.Namespace, claims: int, output: Path) ->
         "--output-dir",
         str(output),
     ]
+    if args.all_candidates:
+        command.append("--all-candidates")
+    return command
 
 
 def _mark_stage(
@@ -436,6 +492,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
         "isolated_recipients": args.isolated_recipients,
         "sample_seed_base": args.sample_seed_base,
         "retest_seed_base": args.retest_seed_base,
+        **_candidate_design(args),
     }
     state.update(status="running", current_stage=None, updated_at=_timestamp())
     _write_json_atomic(state_path, state)

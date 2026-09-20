@@ -95,6 +95,68 @@ class EstimatorCheckpointTests(unittest.TestCase):
             payload["training_metadata"]["training_task_ids"], [0, 1, 2, 3]
         )
 
+    def test_training_checkpoint_records_kind_specific_rank_coverage(self) -> None:
+        rows = []
+        task_id = 0
+        for kind in ("trajectory", "insight"):
+            for index in (0, 1):
+                candidate = {
+                    "candidate_id": f"{kind}-{index}",
+                    "kind": kind,
+                    "index": index,
+                    "task_main": "old claim",
+                    "trajectory": "old answer",
+                    "text": "old insight",
+                }
+                for condition, success in (
+                    ("use_all", 0.0),
+                    ("global_drop", 1.0),
+                ):
+                    rows.append(
+                        {
+                            "task_id": task_id,
+                            "task": {"task_main": "new claim"},
+                            "candidate": candidate,
+                            "repeat_index": 0,
+                            "sample_seed": 0,
+                            "condition": condition,
+                            "retrieval_sizes": {
+                                "successful_trajectories": 2,
+                                "insights": 2,
+                            },
+                            "outcome": {"success": success},
+                        }
+                    )
+                task_id += 1
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "branches.jsonl"
+            checkpoint = Path(directory) / "gate.json"
+            source.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            train_main(
+                (
+                    "--input",
+                    str(source),
+                    "--output",
+                    str(checkpoint),
+                    "--ensemble-size",
+                    "2",
+                    "--min-samples",
+                    "2",
+                    "--epochs",
+                    "4",
+                )
+            )
+            payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            payload["training_metadata"]["candidate_kind_ranks"],
+            {"insight": [1, 2], "trajectory": [1, 2]},
+        )
+
 
 class RuntimeGateTests(unittest.TestCase):
     def test_always_keep_is_exact_identity(self) -> None:
@@ -223,6 +285,86 @@ class RuntimeGateTests(unittest.TestCase):
             )
         self.assertEqual(
             gate._task_decisions[1].reason, "candidate_rank_out_of_scope"
+        )
+
+    def test_checkpoint_predicts_all_trained_kind_rank_pairs_before_drop_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "checkpoint.json"
+            save_gate_checkpoint(
+                path,
+                negative_estimator(),
+                training_metadata={
+                    "candidate_kinds": ["trajectory", "insight"],
+                    "candidate_ranks": [1, 2, 3],
+                    "candidate_kind_ranks": {
+                        "trajectory": [1, 2, 3],
+                        "insight": [1, 2, 3],
+                    },
+                },
+            )
+            gate = GMemoryExposureGate.from_checkpoint(
+                path,
+                mode="learned",
+                kappa=0.0,
+                max_drops=1,
+                candidate_kinds=("trajectory", "insight"),
+            )
+            filtered = gate.filter_retrieval(
+                (
+                    [FakeMessage("one"), FakeMessage("two"), FakeMessage("three")],
+                    [],
+                    ["rule one", "rule two", "rule three"],
+                ),
+                query_task="query",
+                task_state="state",
+            )
+
+        self.assertEqual(len(gate._task_decisions), 6)
+        self.assertTrue(
+            all(
+                row.prediction.source == "bootstrap_t_learner"
+                for row in gate._task_decisions
+            )
+        )
+        self.assertEqual(
+            sum(row.action.value == "drop" for row in gate._task_decisions),
+            1,
+        )
+        self.assertEqual(len(filtered[0]) + len(filtered[2]), 5)
+
+    def test_kind_specific_rank_scope_does_not_cross_kinds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "checkpoint.json"
+            save_gate_checkpoint(
+                path,
+                negative_estimator(),
+                training_metadata={
+                    "candidate_kinds": ["trajectory", "insight"],
+                    "candidate_ranks": [1, 2],
+                    "candidate_kind_ranks": {
+                        "trajectory": [1],
+                        "insight": [2],
+                    },
+                },
+            )
+            gate = GMemoryExposureGate.from_checkpoint(
+                path,
+                mode="learned",
+                kappa=0.0,
+            )
+            gate.filter_retrieval(
+                ([FakeMessage("one")], [], ["rule one", "rule two"]),
+                query_task="query",
+                task_state="state",
+            )
+
+        self.assertEqual(gate._task_decisions[0].reason, "confidently_harmful")
+        self.assertEqual(
+            gate._task_decisions[1].reason, "candidate_rank_out_of_scope"
+        )
+        self.assertEqual(
+            gate._task_decisions[2].prediction.source,
+            "bootstrap_t_learner",
         )
 
 

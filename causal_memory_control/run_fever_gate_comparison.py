@@ -19,7 +19,7 @@ from typing import Any, Mapping, Sequence
 from tqdm import tqdm
 
 
-PIPELINE_SCHEMA = "gmemory-fever-gate-comparison-pipeline-v1"
+PIPELINE_SCHEMA = "gmemory-fever-gate-comparison-pipeline-v2"
 STAGES = ("diagnostic", "train_gate", "native_gmemory", "learned_gate", "compare")
 
 
@@ -58,18 +58,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--diagnostic-results",
         type=Path,
         default=Path(
-            "causal_diagnostic/results/native_fever_rq234_pilot_7b_v3"
+            "causal_diagnostic/results/native_fever_all_candidates_7b_v4"
         ),
     )
     parser.add_argument(
         "--checkpoint",
         type=Path,
-        default=Path("causal_memory_control/checkpoints/fever_gate.json"),
+        default=Path(
+            "causal_memory_control/checkpoints/fever_gate_all_candidates_v4.json"
+        ),
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("causal_memory_control/results/fever_gate_comparison_v3"),
+        default=Path(
+            "causal_memory_control/results/fever_gate_all_candidates_v4"
+        ),
     )
     parser.add_argument("--support-per-label", type=int, default=25)
     parser.add_argument("--evaluation-per-label", type=int, default=50)
@@ -98,8 +102,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--embedding-model", default="sentence-transformers/all-MiniLM-L6-v2"
     )
-    parser.add_argument("--candidate-kind", choices=("trajectory", "insight"), default="trajectory")
+    parser.add_argument(
+        "--candidate-kind",
+        choices=("trajectory", "insight"),
+        default="trajectory",
+    )
     parser.add_argument("--candidate-index", type=int, default=0)
+    parser.add_argument(
+        "--candidate-scope",
+        choices=("all_retrieved", "single"),
+        default="all_retrieved",
+        help=(
+            "Train and evaluate every exposed retrieval by default; use single "
+            "only for the legacy one-kind/one-rank design"
+        ),
+    )
     parser.add_argument("--kappa", type=float, default=1.96)
     parser.add_argument("--delta", type=float, default=0.0)
     parser.add_argument("--max-drops", type=int, default=1)
@@ -125,12 +142,75 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--node-num must be at least 2")
     if min(args.successful_topk, args.failed_topk, args.insights_topk) < 0:
         raise SystemExit("retrieval top-k values must be non-negative")
+    if args.candidate_index < 0:
+        raise SystemExit("--candidate-index must be non-negative")
+    if (
+        args.candidate_scope == "all_retrieved"
+        and args.successful_topk + args.insights_topk < 1
+    ):
+        raise SystemExit(
+            "all_retrieved scope requires --successful-topk or --insights-topk > 0"
+        )
     if args.temperature < 0 or args.kappa < 0 or args.delta < 0:
         raise SystemExit("temperature, kappa, and delta must be non-negative")
     if args.max_drops < -1:
         raise SystemExit("--max-drops must be non-negative or -1")
     if args.bootstrap_samples < 100:
         raise SystemExit("--bootstrap-samples must be at least 100")
+
+
+def _candidate_specs(args: argparse.Namespace) -> list[dict[str, Any]]:
+    if args.candidate_scope == "single":
+        return [
+            {
+                "kind": str(args.candidate_kind),
+                "index": int(args.candidate_index),
+            }
+        ]
+    return [
+        *(
+            {"kind": "trajectory", "index": index}
+            for index in range(int(args.successful_topk))
+        ),
+        *(
+            {"kind": "insight", "index": index}
+            for index in range(int(args.insights_topk))
+        ),
+    ]
+
+
+def _diagnostic_candidate_design(args: argparse.Namespace) -> dict[str, Any]:
+    if args.candidate_scope == "all_retrieved":
+        return {
+            "candidate_scope": "all_retrieved",
+            "candidate_specs": _candidate_specs(args),
+        }
+    return {
+        "candidate_kind": str(args.candidate_kind),
+        "candidate_index": int(args.candidate_index),
+    }
+
+
+def _evaluation_candidate_kinds(args: argparse.Namespace) -> tuple[str, ...]:
+    if args.candidate_scope == "single":
+        return (str(args.candidate_kind),)
+    return tuple(
+        kind
+        for kind, topk in (
+            ("trajectory", args.successful_topk),
+            ("insight", args.insights_topk),
+        )
+        if int(topk) > 0
+    )
+
+
+def _expected_candidate_kind_ranks(
+    args: argparse.Namespace,
+) -> dict[str, list[int]]:
+    result: dict[str, list[int]] = {}
+    for spec in _candidate_specs(args):
+        result.setdefault(str(spec["kind"]), []).append(int(spec["index"]) + 1)
+    return result
 
 
 def _timestamp() -> str:
@@ -228,8 +308,9 @@ def _configuration(args: argparse.Namespace) -> dict[str, Any]:
         "insights_topk": args.insights_topk,
         "threshold": args.threshold,
         "embedding_model": args.embedding_model,
-        "candidate_kind": args.candidate_kind,
-        "candidate_index": args.candidate_index,
+        "candidate_scope": args.candidate_scope,
+        "candidate_specs": _candidate_specs(args),
+        "evaluation_candidate_kinds": list(_evaluation_candidate_kinds(args)),
         "kappa": args.kappa,
         "delta": args.delta,
         "max_drops": args.max_drops,
@@ -292,8 +373,7 @@ def _validate_diagnostic_run(
             "snapshot_design_hash": snapshot.get("design_hash"),
             "memory_dir": str(args.memory_dir),
             "model": args.model,
-            "candidate_kind": args.candidate_kind,
-            "candidate_index": args.candidate_index,
+            **_diagnostic_candidate_design(args),
             "repeats": args.repeats,
             "temperature": args.temperature,
             "node_num": args.node_num,
@@ -393,6 +473,10 @@ def _checkpoint_complete(args: argparse.Namespace) -> bool:
         and metadata.get("candidate_kinds")
         and metadata.get("candidate_ranks")
         and metadata.get("training_contexts")
+        and (
+            args.candidate_scope == "single"
+            or metadata.get("candidate_kind_ranks")
+        )
     )
     if not structurally_complete:
         return False
@@ -420,9 +504,35 @@ def _checkpoint_complete(args: argparse.Namespace) -> bool:
         raise RuntimeError(
             "gate checkpoint training_task_ids do not match the diagnostic training claims"
         )
-    if args.candidate_kind not in {str(value) for value in metadata["candidate_kinds"]}:
+    trained_kinds = {str(value) for value in metadata["candidate_kinds"]}
+    expected_kind_ranks = _expected_candidate_kind_ranks(args)
+    raw_kind_ranks = metadata.get("candidate_kind_ranks")
+    if isinstance(raw_kind_ranks, Mapping):
+        try:
+            trained_kind_ranks = {
+                str(kind): {int(rank) for rank in ranks}
+                for kind, ranks in raw_kind_ranks.items()
+            }
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "gate checkpoint candidate_kind_ranks is invalid"
+            ) from exc
+    else:
+        global_ranks = {int(value) for value in metadata["candidate_ranks"]}
+        trained_kind_ranks = {
+            kind: set(global_ranks) for kind in trained_kinds
+        }
+    missing_pairs = [
+        f"{kind}[rank={rank}]"
+        for kind, ranks in expected_kind_ranks.items()
+        for rank in ranks
+        if kind not in trained_kinds
+        or rank not in trained_kind_ranks.get(kind, set())
+    ]
+    if missing_pairs:
         raise RuntimeError(
-            f"gate checkpoint was not trained for candidate kind {args.candidate_kind!r}"
+            "gate checkpoint has no matched counterfactual training coverage for: "
+            + ", ".join(missing_pairs)
         )
     return True
 
@@ -615,6 +725,8 @@ def _diagnostic_command(args: argparse.Namespace) -> list[str]:
     ]
     if args.skip_smoke:
         command.append("--skip-smoke")
+    if args.candidate_scope == "all_retrieved":
+        command.append("--all-candidates")
     return command
 
 
@@ -688,7 +800,7 @@ def _evaluation_command(
         "--embedding-model",
         args.embedding_model,
         "--candidate-kinds",
-        args.candidate_kind,
+        ",".join(_evaluation_candidate_kinds(args)),
         "--delta",
         str(args.delta),
         "--kappa",

@@ -173,6 +173,19 @@ python -u -m causal_memory_control.run_fever_gate_comparison \
   --model qwen2.5:7b
 ```
 
+The default comparison now uses `--candidate-scope all_retrieved`. For each
+claim it collects matched USE/DROP outcomes separately for successful
+trajectory ranks 1–3 and insight ranks 1–3. The checkpoint records coverage
+by both candidate kind and rank, and the learned run predicts utility for every
+returned successful trajectory and insight. Failed trajectories are not gate
+candidates because MacNet does not expose that return value to its prompt.
+
+All candidates receive a utility prediction before filtering. The deployment
+default remains `--max-drops 1`: if several candidates are confidently
+harmful, only the one with the lowest upper utility bound is removed. This
+matches the training intervention, which drops one candidate while keeping
+its peers fixed. Use `--max-drops -1` only as an explicit multi-drop ablation.
+
 Here `native_gmemory` is the no-gate baseline. Internally it uses
 `always_keep`, which is an identity intervention: every item returned by
 native GMemory retrieval is exposed unchanged. The hook only records a
@@ -183,7 +196,7 @@ claim, diagnostic branch, and final evaluation claim progress bars. The main
 artifacts are:
 
 ```text
-causal_memory_control/results/fever_gate_comparison_v3/
+causal_memory_control/results/fever_gate_all_candidates_v4/
 ├── pipeline_manifest.json
 ├── pipeline_progress.json
 ├── logs/
@@ -238,8 +251,11 @@ the macOS `gmemory_env` virtual environment to a Linux server.
 
 The defaults use 50 support claims, 100 registered evaluation claims, the
 first 40 evaluation claims for causal training, and the remaining 60 for the
-final paired comparison. The two diagnostic collections use seeds 0 and 1000;
-the final comparison uses seed 2000.
+final paired comparison. With Top-3 trajectories plus Top-3 insights, each
+diagnostic seed plans `40 claims × 6 candidates × 6 repeats × 4 conditions =
+5760` branches (missing retrieval ranks are recorded as exclusions). This is
+six times the branch count of the old Top-1-only design. The two diagnostic
+collections use seeds 0 and 1000; the final comparison uses seed 2000.
 
 ### Manual stage-by-stage commands
 
@@ -249,10 +265,10 @@ First collect the counterfactual training branches described in
 
 ```bash
 python -m causal_memory_control.train_gate \
-  --input causal_diagnostic/results/native_fever_rq234_pilot_7b_v3/seed0/branches.jsonl \
-          causal_diagnostic/results/native_fever_rq234_pilot_7b_v3/seed1000_retest/branches.jsonl \
+  --input causal_diagnostic/results/native_fever_all_candidates_7b_v4/seed0/branches.jsonl \
+          causal_diagnostic/results/native_fever_all_candidates_7b_v4/seed1000_retest/branches.jsonl \
   --metric success \
-  --output causal_memory_control/checkpoints/fever_gate.json
+  --output causal_memory_control/checkpoints/fever_gate_all_candidates_v4.json
 ```
 
 The default snapshot registers 100 evaluation claims. The diagnostic uses
@@ -272,6 +288,7 @@ python -m causal_memory_control.fever_experiment \
   --evaluation-offset 40 \
   --claims 60 \
   --mode always_keep \
+  --candidate-kinds trajectory,insight \
   --output-dir causal_memory_control/results/fever_always_keep
 ```
 
@@ -292,7 +309,8 @@ python -m causal_memory_control.fever_experiment \
   --evaluation-offset 40 \
   --claims 60 \
   --mode learned \
-  --checkpoint causal_memory_control/checkpoints/fever_gate.json \
+  --candidate-kinds trajectory,insight \
+  --checkpoint causal_memory_control/checkpoints/fever_gate_all_candidates_v4.json \
   --kappa 1.96 \
   --delta 0 \
   --max-drops 1 \

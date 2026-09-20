@@ -121,6 +121,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--candidate-kind", choices=("trajectory", "insight"), default="trajectory"
     )
     parser.add_argument("--candidate-index", type=int, default=0)
+    parser.add_argument(
+        "--all-candidates",
+        action="store_true",
+        help=(
+            "Collect matched counterfactuals for every retrieved successful "
+            "trajectory and insight instead of one kind/index"
+        ),
+    )
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--selection-seed", type=int, default=42)
     parser.add_argument("--sample-seed-base", type=int, default=0)
@@ -160,6 +168,12 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--repeats must be at least 1")
     if args.candidate_index < 0:
         raise SystemExit("--candidate-index must be non-negative")
+    if min(args.successful_topk, args.failed_topk, args.insights_topk) < 0:
+        raise SystemExit("retrieval top-k values must be non-negative")
+    if args.all_candidates and args.successful_topk + args.insights_topk < 1:
+        raise SystemExit(
+            "--all-candidates requires --successful-topk or --insights-topk > 0"
+        )
     if args.node_num < 2:
         raise SystemExit("--node-num must be at least 2")
     if args.temperature < 0:
@@ -188,6 +202,30 @@ def _parse_recipient_names(value: str) -> tuple[str, ...]:
     return names
 
 
+def _candidate_specs(args: argparse.Namespace) -> tuple[tuple[str, int], ...]:
+    if not args.all_candidates:
+        return ((str(args.candidate_kind), int(args.candidate_index)),)
+    return (
+        *(("trajectory", index) for index in range(int(args.successful_topk))),
+        *(("insight", index) for index in range(int(args.insights_topk))),
+    )
+
+
+def _candidate_design(args: argparse.Namespace) -> dict[str, Any]:
+    specs = _candidate_specs(args)
+    if not args.all_candidates:
+        return {
+            "candidate_kind": specs[0][0],
+            "candidate_index": specs[0][1],
+        }
+    return {
+        "candidate_scope": "all_retrieved",
+        "candidate_specs": [
+            {"kind": kind, "index": index} for kind, index in specs
+        ],
+    }
+
+
 def _directory_hash(path: Path) -> str:
     digest = hashlib.sha256()
     files = sorted(
@@ -214,6 +252,11 @@ def _load_snapshot(
         raise SystemExit(f"snapshot manifest is missing: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     try:
+        validation_kind = args.candidate_kind
+        if args.all_candidates:
+            validation_kind = (
+                "trajectory" if args.successful_topk > 0 else "insight"
+            )
         return validate_snapshot_manifest(
             manifest,
             source_md5=source_md5,
@@ -222,7 +265,7 @@ def _load_snapshot(
             node_num=args.node_num,
             embedding_model=args.embedding_model,
             claims=args.claims,
-            candidate_kind=args.candidate_kind,
+            candidate_kind=validation_kind,
         )
     except SnapshotProvenanceError as exc:
         raise SystemExit(str(exc)) from exc
@@ -233,7 +276,11 @@ def _conditions(recipients: Sequence[str]) -> tuple[str, ...]:
 
 
 def _policy(
-    condition: str, recipients: Sequence[str], args: argparse.Namespace
+    condition: str,
+    recipients: Sequence[str],
+    *,
+    candidate_kind: str,
+    candidate_index: int,
 ) -> MemoryMaskPolicy:
     if condition == "use_all":
         dropped: frozenset[str] = frozenset()
@@ -251,8 +298,8 @@ def _policy(
         raise ValueError(f"unknown condition: {condition}")
     return MemoryMaskPolicy(
         condition=condition,
-        candidate_kind=args.candidate_kind,
-        candidate_index=args.candidate_index,
+        candidate_kind=candidate_kind,
+        candidate_index=candidate_index,
         drop_recipients=dropped,
         drop_from_decision=drop_decision,
     )
@@ -348,6 +395,9 @@ def _run_branch(
     recipients: Sequence[str],
     sample_seed: int,
     cache_path: Path,
+    *,
+    candidate_kind: str,
+    candidate_index: int,
 ) -> tuple[dict[str, Any], int, int]:
     seed_everything(sample_seed)
     branch_task = copy.deepcopy(dict(task))
@@ -389,7 +439,14 @@ def _run_branch(
         raise RuntimeError(
             f"MacNet recipient mismatch: expected {recipients}, got {actual_recipients}"
         )
-    mas.set_memory_policy(_policy(condition, recipients, args))
+    mas.set_memory_policy(
+        _policy(
+            condition,
+            recipients,
+            candidate_kind=candidate_kind,
+            candidate_index=candidate_index,
+        )
+    )
     configure_fever_sampling(mas, args.temperature)
     for agent in mas.agents_team.values():
         agent.add_task_instruction(FEVER_SYSTEM_PROMPT)
@@ -450,6 +507,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
         raise SystemExit("selected evaluation claims overlap snapshot support claims")
 
     memory_hash = _directory_hash(args.memory_dir)
+    candidate_specs = _candidate_specs(args)
     all_recipients = tuple(f"solver_{index}" for index in range(args.node_num))
     isolated_recipients = _parse_recipient_names(args.isolated_recipients)
     unknown_recipients = set(isolated_recipients) - set(all_recipients)
@@ -467,8 +525,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
         "memory_sha256": memory_hash,
         "evaluation_ids": selected_ids,
         "model": args.model,
-        "candidate_kind": args.candidate_kind,
-        "candidate_index": args.candidate_index,
+        **_candidate_design(args),
         "repeats": args.repeats,
         "temperature": args.temperature,
         "node_num": args.node_num,
@@ -524,7 +581,8 @@ def main(argv: Sequence[str] | None = None) -> Path:
     total_calls = total_hits = 0
     exclusions: list[dict[str, Any]] = []
     conditions = _conditions(isolated_recipients)
-    branches_per_claim = args.repeats * len(conditions)
+    branches_per_candidate = args.repeats * len(conditions)
+    branches_per_claim = len(candidate_specs) * branches_per_candidate
     planned_branches = len(selected) * branches_per_claim
     resolved_branches = len(existing)
     _ACTIVE_PROGRESS_PATH = args.output_dir / "collection_progress.json"
@@ -556,23 +614,24 @@ def main(argv: Sequence[str] | None = None) -> Path:
     for raw_example in selected:
         task = prepare_example(raw_example)
         claim_id = int(task["id"])
-        completed_for_claim = {
-            (key[2], key[3]) for key in existing if key[0] == claim_id
-        }
-        expected_for_claim = {
+        expected_for_candidate = {
             (repeat_index, condition)
             for repeat_index in range(args.repeats)
             for condition in conditions
         }
-        candidate_ids_for_claim = {
-            key[1] for key in existing if key[0] == claim_id
-        }
-        if len(candidate_ids_for_claim) > 1:
-            raise RuntimeError(
-                f"claim {claim_id} has multiple persisted candidate ids: "
-                f"{sorted(candidate_ids_for_claim)}"
-            )
-        if completed_for_claim == expected_for_claim:
+        completed_specs: set[tuple[str, int]] = set()
+        for kind, candidate_index in candidate_specs:
+            observed = {
+                (key[2], key[3])
+                for key, row in existing.items()
+                if key[0] == claim_id
+                and str(row.get("candidate", {}).get("kind")) == kind
+                and int(row.get("candidate", {}).get("index", -1))
+                == candidate_index
+            }
+            if observed == expected_for_candidate:
+                completed_specs.add((kind, candidate_index))
+        if len(completed_specs) == len(candidate_specs):
             progress.set_postfix_str(
                 f"claim={claim_id} already complete", refresh=True
             )
@@ -607,28 +666,9 @@ def main(argv: Sequence[str] | None = None) -> Path:
                     threshold=args.threshold,
                 )
             )
-            candidate = candidate_metadata(
-                frozen, args.candidate_kind, args.candidate_index
-            )
-        except IndexError as exc:
-            exclusions.append({"claim_id": claim_id, "reason": str(exc)})
+        except BaseException:
             retrieval_client.close()
-            resolved_branches += branches_per_claim
-            progress.update(branches_per_claim)
-            progress.set_postfix_str(
-                f"claim={claim_id} excluded: {exc}", refresh=True
-            )
-            _update_progress(
-                resolved_branches=resolved_branches,
-                persisted_branches=len(existing),
-                excluded_claims=len(exclusions),
-                current={
-                    "claim_id": claim_id,
-                    "phase": "excluded",
-                    "reason": str(exc),
-                },
-            )
-            continue
+            raise
         total_calls += retrieval_client.calls
         total_hits += retrieval_client.cache_hits
         retrieval_client.close()
@@ -638,91 +678,154 @@ def main(argv: Sequence[str] | None = None) -> Path:
             "insights": len(frozen.insights),
         }
 
-        for repeat_index in range(args.repeats):
-            sample_seed = args.sample_seed_base + repeat_index
-            for condition in conditions:
-                key = (
-                    claim_id,
-                    str(candidate["candidate_id"]),
-                    repeat_index,
-                    condition,
+        for candidate_kind, candidate_index in candidate_specs:
+            try:
+                candidate = candidate_metadata(
+                    frozen, candidate_kind, candidate_index
                 )
-                if key in existing:
-                    continue
-                progress.set_postfix_str(
-                    f"claim={claim_id} repeat={repeat_index} {condition}",
-                    refresh=True,
-                )
-                _update_progress(
-                    current={
+                if args.all_candidates:
+                    candidate = {
+                        **candidate,
+                        "candidate_id": (
+                            f"{candidate['candidate_id']}-rank{candidate_index + 1}"
+                        ),
+                    }
+            except IndexError as exc:
+                exclusions.append(
+                    {
                         "claim_id": claim_id,
-                        "repeat_index": repeat_index,
-                        "condition": condition,
-                        "phase": "inference",
+                        "candidate_kind": candidate_kind,
+                        "candidate_index": candidate_index,
+                        "reason": str(exc),
                     }
                 )
-                outcome, calls, hits = _run_branch(
-                    args,
-                    task,
-                    frozen,
-                    condition,
-                    all_recipients,
-                    sample_seed,
-                    cache_path,
+                resolved_branches += branches_per_candidate
+                progress.update(branches_per_candidate)
+                progress.set_postfix_str(
+                    f"claim={claim_id} {candidate_kind}[{candidate_index}] "
+                    f"excluded: {exc}",
+                    refresh=True,
                 )
-                total_calls += calls
-                total_hits += hits
-                row = {
-                    "runner_schema": RUNNER_SCHEMA,
-                    "design_hash": design_hash,
-                    "run_hash": run_hash,
-                    "event_id": f"fever-{claim_id}-{candidate['candidate_id']}",
-                    "task_id": claim_id,
-                    "task": {
-                        "claim_id": claim_id,
-                        "claim": task["claim"],
-                        "task_main": task["task_main"],
-                        "task_description": task["task_description"],
-                        "gold_label": task["label"],
-                        # Persisted after inference for objective-metric audit.
-                        # The prompt builders never expose this field.
-                        "gold_evidence_page_sets": task[
-                            "gold_evidence_page_sets"
-                        ],
-                    },
-                    "candidate": candidate,
-                    "retrieval_sizes": retrieval_sizes,
-                    "repeat_index": repeat_index,
-                    "sample_seed": sample_seed,
-                    "condition": condition,
-                    "outcome": outcome,
-                    "llm_calls": calls,
-                    "cache_hits": hits,
-                }
-                with rows_path.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-                    handle.flush()
-                existing[key] = row
-                resolved_branches += 1
-                progress.update(1)
                 _update_progress(
                     resolved_branches=resolved_branches,
                     persisted_branches=len(existing),
                     excluded_claims=len(exclusions),
                     current={
                         "claim_id": claim_id,
-                        "repeat_index": repeat_index,
-                        "condition": condition,
-                        "phase": "persisted",
+                        "candidate_kind": candidate_kind,
+                        "candidate_index": candidate_index,
+                        "phase": "excluded",
+                        "reason": str(exc),
                     },
-                    llm_calls_this_process=total_calls,
-                    cache_hits_this_process=total_hits,
                 )
+                continue
+
+            completed_for_candidate = {
+                (key[2], key[3])
+                for key in existing
+                if key[0] == claim_id
+                and key[1] == str(candidate["candidate_id"])
+            }
+            if completed_for_candidate == expected_for_candidate:
+                continue
+
+            for repeat_index in range(args.repeats):
+                sample_seed = args.sample_seed_base + repeat_index
+                for condition in conditions:
+                    key = (
+                        claim_id,
+                        str(candidate["candidate_id"]),
+                        repeat_index,
+                        condition,
+                    )
+                    if key in existing:
+                        continue
+                    progress.set_postfix_str(
+                        f"claim={claim_id} {candidate_kind}[{candidate_index}] "
+                        f"repeat={repeat_index} {condition}",
+                        refresh=True,
+                    )
+                    _update_progress(
+                        current={
+                            "claim_id": claim_id,
+                            "candidate_kind": candidate_kind,
+                            "candidate_index": candidate_index,
+                            "repeat_index": repeat_index,
+                            "condition": condition,
+                            "phase": "inference",
+                        }
+                    )
+                    outcome, calls, hits = _run_branch(
+                        args,
+                        task,
+                        frozen,
+                        condition,
+                        all_recipients,
+                        sample_seed,
+                        cache_path,
+                        candidate_kind=candidate_kind,
+                        candidate_index=candidate_index,
+                    )
+                    total_calls += calls
+                    total_hits += hits
+                    row = {
+                        "runner_schema": RUNNER_SCHEMA,
+                        "design_hash": design_hash,
+                        "run_hash": run_hash,
+                        "event_id": (
+                            f"fever-{claim_id}-{candidate['candidate_id']}"
+                        ),
+                        "task_id": claim_id,
+                        "task": {
+                            "claim_id": claim_id,
+                            "claim": task["claim"],
+                            "task_main": task["task_main"],
+                            "task_description": task["task_description"],
+                            "gold_label": task["label"],
+                            # Persisted after inference for objective-metric audit.
+                            # The prompt builders never expose this field.
+                            "gold_evidence_page_sets": task[
+                                "gold_evidence_page_sets"
+                            ],
+                        },
+                        "candidate": candidate,
+                        "retrieval_sizes": retrieval_sizes,
+                        "repeat_index": repeat_index,
+                        "sample_seed": sample_seed,
+                        "condition": condition,
+                        "outcome": outcome,
+                        "llm_calls": calls,
+                        "cache_hits": hits,
+                    }
+                    with rows_path.open("a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+                        handle.flush()
+                    existing[key] = row
+                    resolved_branches += 1
+                    progress.update(1)
+                    _update_progress(
+                        resolved_branches=resolved_branches,
+                        persisted_branches=len(existing),
+                        excluded_claims=len(exclusions),
+                        current={
+                            "claim_id": claim_id,
+                            "candidate_kind": candidate_kind,
+                            "candidate_index": candidate_index,
+                            "repeat_index": repeat_index,
+                            "condition": condition,
+                            "phase": "persisted",
+                        },
+                        llm_calls_this_process=total_calls,
+                        cache_hits_this_process=total_hits,
+                    )
 
     progress.close()
 
     diagnostics = {
         "registered_evaluation_claims": len(selected),
+        "candidate_specs": [
+            {"kind": kind, "index": index} for kind, index in candidate_specs
+        ],
         "excluded_claims": exclusions,
         "completed_branches": len(existing),
         "conditions_per_event": len(conditions),

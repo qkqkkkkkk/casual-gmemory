@@ -8,16 +8,45 @@ import unittest
 
 from causal_diagnostic.fever_oracle_recipient.run_all import (
     StageFailure,
+    _base_runner_command,
+    _candidate_design,
     _existing_cache_seed,
     _needs_run_resume,
     _needs_snapshot_resume,
     _run_command,
     _run_complete,
     _snapshot_complete,
+    parse_args,
 )
 
 
 class RunAllTests(unittest.TestCase):
+    def test_all_candidate_mode_is_forwarded_with_complete_design(self):
+        args = parse_args(
+            (
+                "--all-candidates",
+                "--successful-topk",
+                "2",
+                "--insights-topk",
+                "3",
+            )
+        )
+        design = _candidate_design(args)
+        command = _base_runner_command(args, 1, Path("output"))
+
+        self.assertEqual(design["candidate_scope"], "all_retrieved")
+        self.assertEqual(
+            design["candidate_specs"],
+            [
+                {"kind": "trajectory", "index": 0},
+                {"kind": "trajectory", "index": 1},
+                {"kind": "insight", "index": 0},
+                {"kind": "insight", "index": 1},
+                {"kind": "insight", "index": 2},
+            ],
+        )
+        self.assertIn("--all-candidates", command)
+
     def test_completion_and_resume_are_derived_from_artifacts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -80,4 +109,3 @@ class RunAllTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

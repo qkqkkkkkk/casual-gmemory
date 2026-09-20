@@ -67,6 +67,7 @@ class GMemoryExposureGate:
         exposure_agent_ids: Sequence[str] = ("host",),
         candidate_kinds: Sequence[str] = ("trajectory", "insight"),
         candidate_ranks: Sequence[int] | None = None,
+        candidate_kind_ranks: Mapping[str, Sequence[int]] | None = None,
         max_drops: int | None = 1,
         task_metadata: Mapping[str, Any] | None = None,
         checkpoint_metadata: Mapping[str, Any] | None = None,
@@ -88,6 +89,18 @@ class GMemoryExposureGate:
             raise ValueError(f"unsupported candidate kinds: {sorted(unknown_kinds)}")
         if candidate_ranks is not None and any(int(rank) < 1 for rank in candidate_ranks):
             raise ValueError("candidate ranks must be positive")
+        normalized_kind_ranks = _normalize_candidate_kind_ranks(
+            candidate_kind_ranks
+        )
+        unknown_rank_kinds = set(normalized_kind_ranks) - {
+            "trajectory",
+            "insight",
+        }
+        if unknown_rank_kinds:
+            raise ValueError(
+                "unsupported candidate kind/rank keys: "
+                f"{sorted(unknown_rank_kinds)}"
+            )
         self.mode = mode
         self.estimator = estimator
         self.feature_builder = feature_builder or TeamExposureFeatureBuilder()
@@ -98,6 +111,14 @@ class GMemoryExposureGate:
         self.candidate_ranks = (
             frozenset(int(rank) for rank in candidate_ranks)
             if candidate_ranks is not None
+            else None
+        )
+        self.candidate_kind_ranks = (
+            {
+                kind: frozenset(ranks)
+                for kind, ranks in normalized_kind_ranks.items()
+            }
+            if candidate_kind_ranks is not None
             else None
         )
         self.max_drops = max_drops
@@ -141,8 +162,48 @@ class GMemoryExposureGate:
                 kwargs.get("candidate_kinds", ("trajectory", "insight"))
             )
             kwargs["candidate_kinds"] = tuple(sorted(requested_kinds & trained_kinds))
-        trained_ranks = checkpoint_metadata.get("candidate_ranks")
-        if trained_ranks:
+        trained_kind_ranks = checkpoint_metadata.get("candidate_kind_ranks")
+        if isinstance(trained_kind_ranks, Mapping) and trained_kind_ranks:
+            normalized_trained = _normalize_candidate_kind_ranks(
+                trained_kind_ranks
+            )
+            requested_kind_ranks = kwargs.get("candidate_kind_ranks")
+            normalized_requested = (
+                _normalize_candidate_kind_ranks(requested_kind_ranks)
+                if isinstance(requested_kind_ranks, Mapping)
+                else None
+            )
+            requested_global_ranks = kwargs.get("candidate_ranks")
+            global_rank_scope = (
+                {int(rank) for rank in requested_global_ranks}
+                if requested_global_ranks is not None
+                else None
+            )
+            requested_kinds = set(
+                kwargs.get("candidate_kinds", ("trajectory", "insight"))
+            )
+            kwargs["candidate_kind_ranks"] = {
+                kind: tuple(
+                    sorted(
+                        ranks
+                        & (
+                            normalized_requested.get(kind, set())
+                            if normalized_requested is not None
+                            else ranks
+                        )
+                        & (
+                            global_rank_scope
+                            if global_rank_scope is not None
+                            else ranks
+                        )
+                    )
+                )
+                for kind, ranks in normalized_trained.items()
+                if kind in requested_kinds
+            }
+            kwargs.pop("candidate_ranks", None)
+        elif checkpoint_metadata.get("candidate_ranks"):
+            trained_ranks = checkpoint_metadata["candidate_ranks"]
             requested_ranks = kwargs.get("candidate_ranks")
             kwargs["candidate_ranks"] = tuple(
                 sorted(
@@ -306,10 +367,15 @@ class GMemoryExposureGate:
                 "candidate_kind_out_of_scope",
                 prediction,
             )
+        allowed_kind_ranks = (
+            self.candidate_kind_ranks.get(event.memory.memory_type, frozenset())
+            if self.candidate_kind_ranks is not None
+            else self.candidate_ranks
+        )
         if (
-            self.candidate_ranks is not None
+            allowed_kind_ranks is not None
             and event.retrieval is not None
-            and event.retrieval.rank not in self.candidate_ranks
+            and event.retrieval.rank not in allowed_kind_ranks
         ):
             prediction = _fixed_prediction(0.0, "out_of_scope")
             return ExposureDecision(
@@ -433,6 +499,30 @@ def save_gate_checkpoint(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     temporary.replace(output)
+
+
+def _normalize_candidate_kind_ranks(
+    value: Mapping[str, Sequence[int]] | None,
+) -> dict[str, set[int]]:
+    if value is None:
+        return {}
+    normalized: dict[str, set[int]] = {}
+    for raw_kind, raw_ranks in value.items():
+        kind = str(raw_kind)
+        if isinstance(raw_ranks, (str, bytes)):
+            raise ValueError(
+                f"candidate ranks for {kind!r} must be a sequence of integers"
+            )
+        try:
+            ranks = {int(rank) for rank in raw_ranks}
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"candidate ranks for {kind!r} must be iterable"
+            ) from exc
+        if any(rank < 1 for rank in ranks):
+            raise ValueError("candidate kind/ranks must be positive")
+        normalized[kind] = ranks
+    return normalized
 
 
 def _fixed_prediction(utility: float, source: str) -> PotentialOutcomePrediction:

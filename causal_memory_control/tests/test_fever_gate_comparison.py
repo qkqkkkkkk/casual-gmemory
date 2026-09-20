@@ -52,6 +52,56 @@ class FeverGateComparisonTests(unittest.TestCase):
                 60,
             )
 
+    def test_default_design_trains_and_evaluates_all_exposed_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = self._args(Path(directory))
+            diagnostic = comparison._diagnostic_command(args)
+            learned = comparison._evaluation_command(
+                args,
+                mode="learned",
+                output=args.output_dir / "learned_gate",
+                resume=False,
+            )
+
+            self.assertIn("--all-candidates", diagnostic)
+            self.assertEqual(
+                learned[learned.index("--candidate-kinds") + 1],
+                "trajectory,insight",
+            )
+            self.assertEqual(
+                comparison._expected_candidate_kind_ranks(args),
+                {"trajectory": [1, 2, 3], "insight": [1, 2, 3]},
+            )
+
+    def test_single_scope_preserves_legacy_candidate_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = self._args(
+                Path(directory),
+                "--candidate-scope",
+                "single",
+                "--candidate-kind",
+                "insight",
+                "--candidate-index",
+                "1",
+            )
+            diagnostic = comparison._diagnostic_command(args)
+            learned = comparison._evaluation_command(
+                args,
+                mode="learned",
+                output=args.output_dir / "learned_gate",
+                resume=False,
+            )
+
+            self.assertNotIn("--all-candidates", diagnostic)
+            self.assertEqual(
+                learned[learned.index("--candidate-kinds") + 1],
+                "insight",
+            )
+            self.assertEqual(
+                comparison._expected_candidate_kind_ranks(args),
+                {"insight": [2]},
+            )
+
     def test_native_and_learned_commands_form_a_resumable_paired_run(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
