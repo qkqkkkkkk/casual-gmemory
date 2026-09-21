@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter, defaultdict
 import copy
 import hashlib
 import json
@@ -127,6 +128,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=(
             "Collect matched counterfactuals for every retrieved successful "
             "trajectory and insight instead of one kind/index"
+        ),
+    )
+    parser.add_argument(
+        "--gate-training-only",
+        action="store_true",
+        help=(
+            "Collect only matched use_all/global_drop branches needed by the "
+            "team gate and skip recipient/RQ3/RQ4 branches"
         ),
     )
     parser.add_argument("--repeats", type=int, default=1)
@@ -271,8 +280,64 @@ def _load_snapshot(
         raise SystemExit(str(exc)) from exc
 
 
-def _conditions(recipients: Sequence[str]) -> tuple[str, ...]:
+def _conditions(
+    recipients: Sequence[str], *, gate_training_only: bool = False
+) -> tuple[str, ...]:
+    if gate_training_only:
+        return ("use_all", "global_drop")
     return ("use_all", "global_drop", *(f"only_{name}" for name in recipients))
+
+
+def _write_gate_training_summary(
+    output_dir: Path,
+    rows: Sequence[Mapping[str, Any]],
+) -> Path:
+    grouped: dict[
+        tuple[int, str], dict[str, list[Mapping[str, Any]]]
+    ] = defaultdict(lambda: defaultdict(list))
+    for row in rows:
+        key = (int(row["task_id"]), str(row["candidate"]["candidate_id"]))
+        grouped[key][str(row["condition"])].append(row)
+
+    signs: Counter[str] = Counter()
+    by_kind_rank: dict[str, Counter[str]] = defaultdict(Counter)
+    complete_events = 0
+    for conditions in grouped.values():
+        use_rows = conditions.get("use_all", ())
+        drop_rows = conditions.get("global_drop", ())
+        if not use_rows or not drop_rows:
+            continue
+        q_use = sum(float(row["outcome"]["success"]) for row in use_rows) / len(
+            use_rows
+        )
+        q_drop = sum(
+            float(row["outcome"]["success"]) for row in drop_rows
+        ) / len(drop_rows)
+        utility = q_use - q_drop
+        sign = "positive" if utility > 0 else "negative" if utility < 0 else "zero"
+        first = use_rows[0]["candidate"]
+        group = f"{first['kind']}:rank{int(first.get('index', 0)) + 1}"
+        signs[sign] += 1
+        by_kind_rank[group][sign] += 1
+        complete_events += 1
+
+    path = output_dir / "gate_training_collection.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "gmemory-fever-gate-training-collection-v1",
+                "complete_events": complete_events,
+                "utility_sign_counts": dict(signs),
+                "utility_sign_counts_by_kind_rank": {
+                    key: dict(value) for key, value in sorted(by_kind_rank.items())
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return path
 
 
 def _policy(
@@ -461,13 +526,6 @@ def _run_branch(
     if after != before:
         raise RuntimeError("read-only GMemory changed persistent memory size")
     _validate_exposure(mas.execution_trace, condition, recipients)
-    local_metrics = {
-        name: score_evidence_pages(
-            mas.execution_trace[-1]["workers"][name]["raw_output"],
-            branch_task.get("gold_evidence_page_sets", []),
-        )
-        for name in recipients
-    }
     outcome = {
         "success": bool(done),
         "reward": float(reward),
@@ -476,14 +534,24 @@ def _run_branch(
         "score_definition": "exact_fever_binary_label_accuracy",
         "prediction": env.last_prediction,
         "gold_label": branch_task["label"],
-        "local_metrics": local_metrics,
-        "actions": [
-            step["decision"]["processed_action"] for step in mas.execution_trace
-        ],
-        "trace": mas.execution_trace,
         "memory_records_before": before,
         "memory_records_after": after,
     }
+    if not args.gate_training_only:
+        outcome.update(
+            local_metrics={
+                name: score_evidence_pages(
+                    mas.execution_trace[-1]["workers"][name]["raw_output"],
+                    branch_task.get("gold_evidence_page_sets", []),
+                )
+                for name in recipients
+            },
+            actions=[
+                step["decision"]["processed_action"]
+                for step in mas.execution_trace
+            ],
+            trace=mas.execution_trace,
+        )
     return outcome, calls, hits
 
 
@@ -526,6 +594,9 @@ def main(argv: Sequence[str] | None = None) -> Path:
         "evaluation_ids": selected_ids,
         "model": args.model,
         **_candidate_design(args),
+        "collection_scope": (
+            "gate_training" if args.gate_training_only else "full_causal"
+        ),
         "repeats": args.repeats,
         "temperature": args.temperature,
         "node_num": args.node_num,
@@ -580,7 +651,9 @@ def main(argv: Sequence[str] | None = None) -> Path:
     design_hash, run_hash = _stable_hash(design), _stable_hash(run)
     total_calls = total_hits = 0
     exclusions: list[dict[str, Any]] = []
-    conditions = _conditions(isolated_recipients)
+    conditions = _conditions(
+        isolated_recipients, gate_training_only=args.gate_training_only
+    )
     branches_per_candidate = args.repeats * len(conditions)
     branches_per_claim = len(candidate_specs) * branches_per_candidate
     planned_branches = len(selected) * branches_per_claim
@@ -782,14 +855,21 @@ def main(argv: Sequence[str] | None = None) -> Path:
                             "task_main": task["task_main"],
                             "task_description": task["task_description"],
                             "gold_label": task["label"],
-                            # Persisted after inference for objective-metric audit.
-                            # The prompt builders never expose this field.
-                            "gold_evidence_page_sets": task[
-                                "gold_evidence_page_sets"
-                            ],
+                            **(
+                                {}
+                                if args.gate_training_only
+                                else {
+                                    # Persisted after inference for objective-
+                                    # metric audit. Prompt builders never expose it.
+                                    "gold_evidence_page_sets": task[
+                                        "gold_evidence_page_sets"
+                                    ]
+                                }
+                            ),
                         },
                         "candidate": candidate,
                         "retrieval_sizes": retrieval_sizes,
+                        "exposure_count": len(all_recipients) + 1,
                         "repeat_index": repeat_index,
                         "sample_seed": sample_seed,
                         "condition": condition,
@@ -846,14 +926,19 @@ def main(argv: Sequence[str] | None = None) -> Path:
         llm_calls_this_process=total_calls,
         cache_hits_this_process=total_hits,
     )
-    analysis_path = write_analysis(
-        args.output_dir,
-        retest_results=args.retest_results,
-        delta=args.delta,
-        bootstrap_samples=args.bootstrap_samples,
-        confidence_level=args.confidence_level,
-        seed=args.selection_seed,
-    )
+    if args.gate_training_only:
+        analysis_path = _write_gate_training_summary(
+            args.output_dir, list(existing.values())
+        )
+    else:
+        analysis_path = write_analysis(
+            args.output_dir,
+            retest_results=args.retest_results,
+            delta=args.delta,
+            bootstrap_samples=args.bootstrap_samples,
+            confidence_level=args.confidence_level,
+            seed=args.selection_seed,
+        )
     _update_progress(
         status="completed",
         resolved_branches=resolved_branches,

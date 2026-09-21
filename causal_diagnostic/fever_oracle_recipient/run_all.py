@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-ORCHESTRATOR_SCHEMA = "native-gmemory-macnet-fever-pipeline-v2"
+ORCHESTRATOR_SCHEMA = "native-gmemory-macnet-fever-pipeline-v3"
 
 
 class StageFailure(RuntimeError):
@@ -102,6 +102,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "trajectory and insight"
         ),
     )
+    parser.add_argument(
+        "--gate-training-only",
+        action="store_true",
+        help=(
+            "Collect only use_all/global_drop branches required to train the "
+            "team gate"
+        ),
+    )
     parser.add_argument("--delta", type=float, default=0.0)
     parser.add_argument("--bootstrap-samples", type=int, default=10_000)
     parser.add_argument("--confidence-level", type=float, default=0.95)
@@ -115,7 +123,9 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--smoke-claims cannot exceed --claims")
     if args.repeats < 1:
         raise SystemExit("--repeats must be at least 1")
-    if args.repeats < 4 or args.repeats % 2 != 0:
+    if not args.gate_training_only and (
+        args.repeats < 4 or args.repeats % 2 != 0
+    ):
         raise SystemExit(
             "RQ3/RQ4 split-half analysis requires an even --repeats >= 4 "
             "(recommended: 6)"
@@ -262,6 +272,9 @@ def _validate_completed_run(
             "memory_dir": str(args.memory_dir),
             "model": args.model,
             **_candidate_design(args),
+            "collection_scope": (
+                "gate_training" if args.gate_training_only else "full_causal"
+            ),
             "repeats": repeats,
             "temperature": args.temperature,
             "node_num": args.node_num,
@@ -305,8 +318,15 @@ def _snapshot_complete(memory_dir: Path) -> bool:
 
 def _run_complete(output_dir: Path) -> bool:
     progress = _load_json(output_dir / "collection_progress.json")
+    analysis_complete = any(
+        path.is_file()
+        for path in (
+            output_dir / "oracle_recipient_analysis.json",
+            output_dir / "gate_training_collection.json",
+        )
+    )
     return bool(
-        (output_dir / "oracle_recipient_analysis.json").is_file()
+        analysis_complete
         and (progress is None or progress.get("status") == "completed")
     )
 
@@ -449,6 +469,8 @@ def _base_runner_command(
     ]
     if args.all_candidates:
         command.append("--all-candidates")
+    if args.gate_training_only:
+        command.append("--gate-training-only")
     return command
 
 
@@ -493,6 +515,9 @@ def main(argv: Sequence[str] | None = None) -> Path:
         "sample_seed_base": args.sample_seed_base,
         "retest_seed_base": args.retest_seed_base,
         **_candidate_design(args),
+        "collection_scope": (
+            "gate_training" if args.gate_training_only else "full_causal"
+        ),
     }
     state.update(status="running", current_stage=None, updated_at=_timestamp())
     _write_json_atomic(state_path, state)
@@ -692,11 +717,16 @@ def main(argv: Sequence[str] | None = None) -> Path:
 
     overall.close()
     state.update(status="completed", current_stage=None, updated_at=_timestamp())
+    report_name = (
+        "gate_training_collection.json"
+        if args.gate_training_only
+        else "run_report.md"
+    )
     state["artifacts"] = {
         "snapshot": str(args.memory_dir / "causal_snapshot_manifest.json"),
         "seed0": str(seed0_dir),
         "retest": str(retest_dir),
-        "report": str(retest_dir / "run_report.md"),
+        "report": str(retest_dir / report_name),
     }
     _write_json_atomic(state_path, state)
     print(
@@ -710,7 +740,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
             indent=2,
         )
     )
-    return retest_dir / "run_report.md"
+    return retest_dir / report_name
 
 
 if __name__ == "__main__":

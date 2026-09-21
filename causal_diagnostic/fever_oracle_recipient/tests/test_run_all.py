@@ -25,6 +25,7 @@ class RunAllTests(unittest.TestCase):
         args = parse_args(
             (
                 "--all-candidates",
+                "--gate-training-only",
                 "--successful-topk",
                 "2",
                 "--insights-topk",
@@ -46,6 +47,7 @@ class RunAllTests(unittest.TestCase):
             ],
         )
         self.assertIn("--all-candidates", command)
+        self.assertIn("--gate-training-only", command)
 
     def test_completion_and_resume_are_derived_from_artifacts(self):
         with tempfile.TemporaryDirectory() as directory:

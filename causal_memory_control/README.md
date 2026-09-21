@@ -170,7 +170,23 @@ the learned gate on the same held-out claims, and writes the paired report:
 python -u -m causal_memory_control.run_fever_gate_comparison \
   --data data/fever/fever_dev.jsonl \
   --endpoint http://127.0.0.1:11436/v1 \
-  --model qwen2.5:7b
+  --model qwen2.5:7b \
+  --use-all-binary-data
+```
+
+The bundled FEVER dev file has 3,333 `SUPPORTS`, 3,333 `REFUTES`, and
+3,333 `NOT ENOUGH INFO` rows. This experiment is binary, so all-data mode uses
+all 6,666 binary rows exactly once: 50 support-memory claims, 5,292 gate
+training claims, and 1,324 final-test claims with the default
+`--training-fraction 0.8`. The three sets are registered, disjoint, and checked
+for checkpoint/test leakage. `NOT ENOUGH INFO` remains outside the binary task.
+Inspect the resolved split and cost without creating files or calling a model:
+
+```bash
+python -m causal_memory_control.run_fever_gate_comparison \
+  --data data/fever/fever_dev.jsonl \
+  --use-all-binary-data \
+  --plan-only
 ```
 
 The default comparison now uses `--candidate-scope all_retrieved`. For each
@@ -186,6 +202,22 @@ harmful, only the one with the lowest upper utility bound is removed. This
 matches the training intervention, which drops one candidate while keeping
 its peers fixed. Use `--max-drops -1` only as an explicit multi-drop ablation.
 
+For scalable gate training, the comparison defaults to
+`--diagnostic-scope gate_training --repeats 2`. It collects only the matched
+`use_all/global_drop` branches consumed by `train_gate`; the recipient-specific
+RQ3/RQ4 branches are omitted. Use `--diagnostic-scope full_causal --repeats 6`
+only when those causal reports are also required. Gate-only branch rows also
+omit full execution traces and evidence-page audit fields to limit disk use.
+
+The v5 deployment defaults address the overly conservative v4 uncertainty:
+
+- `--residual-noise-scale 0` uses bootstrap-ensemble uncertainty without
+  treating the held-in outcome residual as an irreducible per-candidate floor;
+- `--kappa 0.5` retains an uncertainty penalty but is less conservative than
+  the old `1.96` setting;
+- both values are recorded in manifests/checkpoints and may be overridden for
+  ablations. A scale of `1` plus `kappa 1.96` reproduces the old behavior.
+
 Here `native_gmemory` is the no-gate baseline. Internally it uses
 `always_keep`, which is an identity intervention: every item returned by
 native GMemory retrieval is exposed unchanged. The hook only records a
@@ -196,7 +228,7 @@ claim, diagnostic branch, and final evaluation claim progress bars. The main
 artifacts are:
 
 ```text
-causal_memory_control/results/fever_gate_all_candidates_v4/
+causal_memory_control/results/fever_gate_all_binary_v5/
 ├── pipeline_manifest.json
 ├── pipeline_progress.json
 ├── logs/
@@ -238,7 +270,8 @@ python -u -m causal_memory_control.run_fever_gate_comparison \
   --data data/fever/fever_dev.jsonl \
   --endpoint http://127.0.0.1:11436/v1 \
   --model qwen2.5:7b \
-  2>&1 | tee fever_gate_console.log
+  --use-all-binary-data \
+  2>&1 | tee fever_gate_all_binary_v5_console.log
 ```
 
 Detach with `Ctrl-b d`; reconnect with `tmux attach -t fever-gate`. If the
@@ -249,47 +282,48 @@ Create the server environment first with `conda create -n GMemory python=3.12`
 and `pip install -r requirements.txt` if it does not already exist. Do not copy
 the macOS `gmemory_env` virtual environment to a Linux server.
 
-The defaults use 50 support claims, 100 registered evaluation claims, the
-first 40 evaluation claims for causal training, and the remaining 60 for the
-final paired comparison. With Top-3 trajectories plus Top-3 insights, each
-diagnostic seed plans `40 claims × 6 candidates × 6 repeats × 4 conditions =
-5760` branches (missing retrieval ranks are recorded as exclusions). This is
-six times the branch count of the old Top-1-only design. The two diagnostic
-collections use seeds 0 and 1000; the final comparison uses seed 2000.
+In all-binary mode, each diagnostic seed plans
+`5292 claims × 6 candidates × 2 repeats × 2 conditions = 127008` branches;
+the two training seeds total 254,016 branches. This remains a large server
+experiment. Missing retrieval ranks are recorded as exclusions, completed
+branches are append-only, and rerunning the identical command resumes rather
+than restarting. The two diagnostic collections use seeds 0 and 1000; the
+final comparison uses seed 2000.
 
 ### Manual stage-by-stage commands
 
 First collect the counterfactual training branches described in
-`causal_diagnostic/fever_oracle_recipient/README.md`. With its default
-40-claim pilot, train on the two independent repeat sets:
+`causal_diagnostic/fever_oracle_recipient/README.md`. In all-binary mode, train
+on the two independent repeat sets:
 
 ```bash
 python -m causal_memory_control.train_gate \
-  --input causal_diagnostic/results/native_fever_all_candidates_7b_v4/seed0/branches.jsonl \
-          causal_diagnostic/results/native_fever_all_candidates_7b_v4/seed1000_retest/branches.jsonl \
+  --input causal_diagnostic/results/native_fever_all_binary_gate_7b_v5/seed0/branches.jsonl \
+          causal_diagnostic/results/native_fever_all_binary_gate_7b_v5/seed1000_retest/branches.jsonl \
   --metric success \
-  --output causal_memory_control/checkpoints/fever_gate_all_candidates_v4.json
+  --residual-noise-scale 0 \
+  --output causal_memory_control/checkpoints/fever_gate_all_binary_v5.json
 ```
 
-The default snapshot registers 100 evaluation claims. The diagnostic uses
-positions 0–39 for training, so use the disjoint positions 40–99 for final
-evaluation. Run Always Keep first:
+The all-binary snapshot registers 6,616 post-support claims. The diagnostic
+uses positions 0–5,291 for training, so use the disjoint positions 5,292–6,615
+for final evaluation. Run Always Keep first:
 
 ```bash
 python -m causal_memory_control.fever_experiment \
   --data data/fever/fever_dev.jsonl \
-  --memory-dir causal_diagnostic/memory_snapshots/fever_evidence_support50_7b_v3/g-memory \
+  --memory-dir causal_diagnostic/memory_snapshots/fever_evidence_support50_all_binary_7b_v5/g-memory \
   --endpoint http://127.0.0.1:11436/v1 \
   --model qwen2.5:7b \
   --graph-type Chain \
   --node-num 3 \
   --temperature 0.7 \
   --seed 2000 \
-  --evaluation-offset 40 \
-  --claims 60 \
+  --evaluation-offset 5292 \
+  --claims 1324 \
   --mode always_keep \
   --candidate-kinds trajectory,insight \
-  --output-dir causal_memory_control/results/fever_always_keep
+  --output-dir causal_memory_control/results/fever_all_binary_v5_always_keep
 ```
 
 Then run the learned policy with identical host, retrieval, task, and seed
@@ -299,23 +333,23 @@ the same saved response; prompts changed by a DROP still invoke the model.
 ```bash
 python -m causal_memory_control.fever_experiment \
   --data data/fever/fever_dev.jsonl \
-  --memory-dir causal_diagnostic/memory_snapshots/fever_evidence_support50_7b_v3/g-memory \
+  --memory-dir causal_diagnostic/memory_snapshots/fever_evidence_support50_all_binary_7b_v5/g-memory \
   --endpoint http://127.0.0.1:11436/v1 \
   --model qwen2.5:7b \
   --graph-type Chain \
   --node-num 3 \
   --temperature 0.7 \
   --seed 2000 \
-  --evaluation-offset 40 \
-  --claims 60 \
+  --evaluation-offset 5292 \
+  --claims 1324 \
   --mode learned \
   --candidate-kinds trajectory,insight \
-  --checkpoint causal_memory_control/checkpoints/fever_gate_all_candidates_v4.json \
-  --kappa 1.96 \
+  --checkpoint causal_memory_control/checkpoints/fever_gate_all_binary_v5.json \
+  --kappa 0.5 \
   --delta 0 \
   --max-drops 1 \
-  --cache-seed-from causal_memory_control/results/fever_always_keep/llm_cache.sqlite \
-  --output-dir causal_memory_control/results/fever_learned
+  --cache-seed-from causal_memory_control/results/fever_all_binary_v5_always_keep/llm_cache.sqlite \
+  --output-dir causal_memory_control/results/fever_all_binary_v5_learned
 ```
 
 Each output directory contains `run_manifest.json`, resumable `progress.json`,
@@ -329,9 +363,9 @@ Compare exact-label accuracy and keep rate with the same paired reporter:
 
 ```bash
 python -m causal_memory_control.compare_gate_runs \
-  --baseline causal_memory_control/results/fever_always_keep/memory_gate.jsonl \
-  --gate causal_memory_control/results/fever_learned/memory_gate.jsonl \
-  --output causal_memory_control/results/fever_comparison.json
+  --baseline causal_memory_control/results/fever_all_binary_v5_always_keep/memory_gate.jsonl \
+  --gate causal_memory_control/results/fever_all_binary_v5_learned/memory_gate.jsonl \
+  --output causal_memory_control/results/fever_all_binary_v5_comparison.json
 ```
 
 ## Tests

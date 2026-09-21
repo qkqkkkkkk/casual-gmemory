@@ -142,6 +142,7 @@ class AmortizedUtilityEstimator:
         seed: int = 23,
         utility_threshold: float = 0.0,
         include_residual_noise: bool = True,
+        residual_noise_scale: float | None = None,
     ):
         if ensemble_size < 2:
             raise ValueError("ensemble_size must be at least two")
@@ -149,6 +150,8 @@ class AmortizedUtilityEstimator:
             raise ValueError("min_samples must be at least two")
         if utility_threshold < 0:
             raise ValueError("utility_threshold must be non-negative")
+        if residual_noise_scale is not None and residual_noise_scale < 0:
+            raise ValueError("residual_noise_scale must be non-negative")
         self.ensemble_size = ensemble_size
         self.min_samples = min_samples
         self.learning_rate = learning_rate
@@ -156,7 +159,13 @@ class AmortizedUtilityEstimator:
         self.l2 = l2
         self.seed = seed
         self.utility_threshold = utility_threshold
-        self.include_residual_noise = include_residual_noise
+        self.residual_noise_scale = (
+            float(residual_noise_scale)
+            if residual_noise_scale is not None
+            else (1.0 if include_residual_noise else 0.0)
+        )
+        # Retain the old public field and checkpoint key for compatibility.
+        self.include_residual_noise = self.residual_noise_scale > 0.0
         self._models: list[tuple[_LinearRegressor, _LinearRegressor]] = []
         self._residual_use = 0.0
         self._residual_drop = 0.0
@@ -216,8 +225,10 @@ class AmortizedUtilityEstimator:
         utility = q_use - q_drop
         ensemble_variance = _sample_variance(utility_values)
         residual_variance = 0.0
-        if self.include_residual_noise:
-            residual_variance = self._residual_use**2 + self._residual_drop**2
+        if self.residual_noise_scale > 0.0:
+            residual_variance = self.residual_noise_scale**2 * (
+                self._residual_use**2 + self._residual_drop**2
+            )
         uncertainty = math.sqrt(max(0.0, ensemble_variance + residual_variance))
         if utility > self.utility_threshold:
             utility_class = "positive"
@@ -254,6 +265,7 @@ class AmortizedUtilityEstimator:
                 "seed": self.seed,
                 "utility_threshold": self.utility_threshold,
                 "include_residual_noise": self.include_residual_noise,
+                "residual_noise_scale": self.residual_noise_scale,
             },
             "training_samples": self.training_samples,
             "residual_use": self._residual_use,

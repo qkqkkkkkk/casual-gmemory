@@ -25,6 +25,14 @@ cache. Native MacNet's newline stop truncated the required second-line
 `Finish[...]` label in that version. The v3 snapshot disables that stop for
 this two-line FEVER protocol and uses a separate directory and cache.
 
+For the full-data gate experiment, prefer
+`python -m causal_memory_control.run_fever_gate_comparison
+--use-all-binary-data`. It automatically registers the full disjoint split and
+passes `--all-candidates --gate-training-only` here. Gate-training-only mode
+collects just `use_all/global_drop`, accepts fewer repeats, writes compact
+branch rows, and produces `gate_training_collection.json`; it intentionally
+does not produce the recipient/RQ3/RQ4 report described below.
+
 ## Recommended: run everything with one resumable command
 
 From the repository root, this one command builds the frozen snapshot, runs a

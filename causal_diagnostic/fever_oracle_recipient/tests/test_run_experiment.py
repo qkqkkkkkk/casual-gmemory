@@ -10,6 +10,7 @@ from causal_diagnostic.fever_oracle_recipient.run_experiment import (
     _candidate_design,
     _candidate_specs,
     _prepare_output,
+    _write_gate_training_summary,
 )
 
 
@@ -76,6 +77,34 @@ class RunExperimentCandidateScopeTests(unittest.TestCase):
                 {"run": "seed-0"},
             )
             self.assertEqual(len(resumed), 2)
+
+    def test_gate_training_summary_uses_only_matched_team_outcomes(self) -> None:
+        rows = [
+            {
+                "task_id": 7,
+                "candidate": {
+                    "candidate_id": "trajectory-a",
+                    "kind": "trajectory",
+                    "index": 1,
+                },
+                "condition": condition,
+                "outcome": {"success": success},
+            }
+            for condition, success in (
+                ("use_all", 0.0),
+                ("global_drop", 1.0),
+            )
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = _write_gate_training_summary(Path(directory), rows)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["complete_events"], 1)
+        self.assertEqual(payload["utility_sign_counts"], {"negative": 1})
+        self.assertEqual(
+            payload["utility_sign_counts_by_kind_rank"],
+            {"trajectory:rank2": {"negative": 1}},
+        )
 
 
 if __name__ == "__main__":

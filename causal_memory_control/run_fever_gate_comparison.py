@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shlex
@@ -18,8 +20,13 @@ from typing import Any, Mapping, Sequence
 
 from tqdm import tqdm
 
+from causal_diagnostic.fever_oracle_recipient.data import (
+    BINARY_LABELS,
+    load_binary_fever,
+)
 
-PIPELINE_SCHEMA = "gmemory-fever-gate-comparison-pipeline-v2"
+
+PIPELINE_SCHEMA = "gmemory-fever-gate-comparison-pipeline-v3"
 STAGES = ("diagnostic", "train_gate", "native_gmemory", "learned_gate", "compare")
 
 
@@ -51,36 +58,53 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=Path(
             "causal_diagnostic/memory_snapshots/"
-            "fever_evidence_support50_7b_v3/g-memory"
+            "fever_evidence_support50_all_binary_7b_v5/g-memory"
         ),
     )
     parser.add_argument(
         "--diagnostic-results",
         type=Path,
         default=Path(
-            "causal_diagnostic/results/native_fever_all_candidates_7b_v4"
+            "causal_diagnostic/results/native_fever_all_binary_gate_7b_v5"
         ),
     )
     parser.add_argument(
         "--checkpoint",
         type=Path,
         default=Path(
-            "causal_memory_control/checkpoints/fever_gate_all_candidates_v4.json"
+            "causal_memory_control/checkpoints/fever_gate_all_binary_v5.json"
         ),
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path(
-            "causal_memory_control/results/fever_gate_all_candidates_v4"
+            "causal_memory_control/results/fever_gate_all_binary_v5"
         ),
     )
     parser.add_argument("--support-per-label", type=int, default=25)
     parser.add_argument("--evaluation-per-label", type=int, default=50)
     parser.add_argument("--training-claims", type=int, default=40)
+    parser.add_argument(
+        "--use-all-binary-data",
+        action="store_true",
+        help=(
+            "Use every SUPPORTS/REFUTES example exactly once across support, "
+            "gate training, and final evaluation"
+        ),
+    )
+    parser.add_argument(
+        "--training-fraction",
+        type=float,
+        default=0.8,
+        help=(
+            "In all-data mode, fraction of post-support examples per label "
+            "assigned to gate training; the remainder is final evaluation"
+        ),
+    )
     parser.add_argument("--smoke-claims", type=int, default=4)
     parser.add_argument("--skip-smoke", action="store_true")
-    parser.add_argument("--repeats", type=int, default=6)
+    parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--split-seed", type=int, default=42)
     parser.add_argument("--build-seed", type=int, default=42)
     parser.add_argument("--selection-seed", type=int, default=42)
@@ -117,10 +141,33 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "only for the legacy one-kind/one-rank design"
         ),
     )
-    parser.add_argument("--kappa", type=float, default=1.96)
+    parser.add_argument(
+        "--diagnostic-scope",
+        choices=("gate_training", "full_causal"),
+        default="gate_training",
+        help=(
+            "gate_training collects only use_all/global_drop; full_causal also "
+            "runs recipient branches for RQ3/RQ4"
+        ),
+    )
+    parser.add_argument("--kappa", type=float, default=0.5)
     parser.add_argument("--delta", type=float, default=0.0)
     parser.add_argument("--max-drops", type=int, default=1)
+    parser.add_argument(
+        "--residual-noise-scale",
+        type=float,
+        default=0.0,
+        help=(
+            "Scale the held-in residual uncertainty floor; 0 uses ensemble-only "
+            "uncertainty and 1 reproduces the conservative legacy behavior"
+        ),
+    )
     parser.add_argument("--bootstrap-samples", type=int, default=10_000)
+    parser.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="Print the resolved split and branch counts without writing or running",
+    )
     return parser.parse_args(argv)
 
 
@@ -136,8 +183,14 @@ def _validate_args(args: argparse.Namespace) -> None:
         )
     if not 1 <= args.smoke_claims <= args.training_claims:
         raise SystemExit("--smoke-claims must be in [1, training-claims]")
-    if args.repeats < 4 or args.repeats % 2:
-        raise SystemExit("--repeats must be even and at least 4")
+    if args.repeats < 1:
+        raise SystemExit("--repeats must be at least 1")
+    if args.diagnostic_scope == "full_causal" and (
+        args.repeats < 4 or args.repeats % 2
+    ):
+        raise SystemExit(
+            "full_causal diagnostics require an even --repeats >= 4"
+        )
     if args.node_num < 2:
         raise SystemExit("--node-num must be at least 2")
     if min(args.successful_topk, args.failed_topk, args.insights_topk) < 0:
@@ -151,12 +204,99 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit(
             "all_retrieved scope requires --successful-topk or --insights-topk > 0"
         )
-    if args.temperature < 0 or args.kappa < 0 or args.delta < 0:
-        raise SystemExit("temperature, kappa, and delta must be non-negative")
+    if not 0.0 < args.training_fraction < 1.0:
+        raise SystemExit("--training-fraction must be in (0,1)")
+    if (
+        args.temperature < 0
+        or args.kappa < 0
+        or args.delta < 0
+        or args.residual_noise_scale < 0
+    ):
+        raise SystemExit(
+            "temperature, kappa, delta, and residual-noise-scale must be "
+            "non-negative"
+        )
     if args.max_drops < -1:
         raise SystemExit("--max-drops must be non-negative or -1")
     if args.bootstrap_samples < 100:
         raise SystemExit("--bootstrap-samples must be at least 100")
+
+
+def _resolve_data_plan(args: argparse.Namespace) -> None:
+    """Expand all-data mode into the existing balanced registered split."""
+    args.binary_label_counts = None
+    args.binary_examples_used = None
+    args.binary_examples_unused = None
+    if not args.use_all_binary_data:
+        return
+
+    examples = load_binary_fever(args.data)
+    counts = Counter(str(row["label"]) for row in examples)
+    missing = [label for label in BINARY_LABELS if counts[label] < 2]
+    if missing:
+        raise SystemExit(f"all-data mode has insufficient labels: {missing}")
+    if len({counts[label] for label in BINARY_LABELS}) != 1:
+        raise SystemExit(
+            "--use-all-binary-data requires equal SUPPORTS/REFUTES counts so "
+            "the registered split can remain balanced without discarding rows"
+        )
+    balanced_per_label = min(counts[label] for label in BINARY_LABELS)
+    evaluation_per_label = balanced_per_label - int(args.support_per_label)
+    if evaluation_per_label < 2:
+        raise SystemExit(
+            "all-data mode leaves fewer than two post-support examples per label"
+        )
+    training_per_label = math.floor(
+        evaluation_per_label * float(args.training_fraction)
+    )
+    if not 1 <= training_per_label < evaluation_per_label:
+        raise SystemExit(
+            "--training-fraction leaves no training or final-evaluation examples"
+        )
+
+    args.evaluation_per_label = evaluation_per_label
+    args.training_claims = 2 * training_per_label
+    args.binary_label_counts = {
+        label: int(counts[label]) for label in BINARY_LABELS
+    }
+    args.binary_examples_used = 2 * balanced_per_label
+    args.binary_examples_unused = len(examples) - args.binary_examples_used
+
+
+def _experiment_plan(args: argparse.Namespace) -> dict[str, Any]:
+    candidate_count = len(_candidate_specs(args))
+    recipient_count = len(
+        {
+            value.strip()
+            for value in args.isolated_recipients.split(",")
+            if value.strip()
+        }
+    )
+    condition_count = (
+        2 if args.diagnostic_scope == "gate_training" else 2 + recipient_count
+    )
+    branches_per_seed = (
+        args.training_claims
+        * candidate_count
+        * args.repeats
+        * condition_count
+    )
+    return {
+        "binary_label_counts": getattr(args, "binary_label_counts", None),
+        "binary_examples_used": getattr(args, "binary_examples_used", None),
+        "binary_examples_unused": getattr(args, "binary_examples_unused", None),
+        "support_claims": 2 * args.support_per_label,
+        "gate_training_claims": args.training_claims,
+        "gate_training_candidate_events": args.training_claims * candidate_count,
+        "final_evaluation_claims": (
+            2 * args.evaluation_per_label - args.training_claims
+        ),
+        "candidate_count_per_claim": candidate_count,
+        "diagnostic_conditions": condition_count,
+        "repeats_per_seed": args.repeats,
+        "diagnostic_branches_per_seed": branches_per_seed,
+        "diagnostic_branches_two_seeds": 2 * branches_per_seed,
+    }
 
 
 def _candidate_specs(args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -289,6 +429,8 @@ def _configuration(args: argparse.Namespace) -> dict[str, Any]:
         "support_per_label": args.support_per_label,
         "evaluation_per_label": args.evaluation_per_label,
         "training_claims": args.training_claims,
+        "use_all_binary_data": args.use_all_binary_data,
+        "training_fraction": args.training_fraction,
         "final_evaluation_claims": 2 * args.evaluation_per_label - args.training_claims,
         "smoke_claims": args.smoke_claims,
         "skip_smoke": args.skip_smoke,
@@ -311,10 +453,13 @@ def _configuration(args: argparse.Namespace) -> dict[str, Any]:
         "candidate_scope": args.candidate_scope,
         "candidate_specs": _candidate_specs(args),
         "evaluation_candidate_kinds": list(_evaluation_candidate_kinds(args)),
+        "diagnostic_scope": args.diagnostic_scope,
         "kappa": args.kappa,
         "delta": args.delta,
         "max_drops": args.max_drops,
+        "residual_noise_scale": args.residual_noise_scale,
         "bootstrap_samples": args.bootstrap_samples,
+        "experiment_plan": _experiment_plan(args),
     }
 
 
@@ -374,6 +519,7 @@ def _validate_diagnostic_run(
             "memory_dir": str(args.memory_dir),
             "model": args.model,
             **_diagnostic_candidate_design(args),
+            "collection_scope": args.diagnostic_scope,
             "repeats": args.repeats,
             "temperature": args.temperature,
             "node_num": args.node_num,
@@ -480,6 +626,28 @@ def _checkpoint_complete(args: argparse.Namespace) -> bool:
     )
     if not structurally_complete:
         return False
+    estimator_payload = payload.get("estimator", {})
+    if not isinstance(estimator_payload, Mapping):
+        return False
+    estimator_config = estimator_payload.get("config", {})
+    if not isinstance(estimator_config, Mapping):
+        return False
+    stored_residual_scale = estimator_config.get("residual_noise_scale")
+    if stored_residual_scale is None:
+        stored_residual_scale = (
+            1.0 if estimator_config.get("include_residual_noise", True) else 0.0
+        )
+    if not math.isclose(
+        float(stored_residual_scale),
+        float(args.residual_noise_scale),
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise RuntimeError(
+            "gate checkpoint residual_noise_scale="
+            f"{stored_residual_scale!r}, but this pipeline requests "
+            f"{args.residual_noise_scale!r}"
+        )
     seed0 = args.diagnostic_results / f"seed{args.sample_seed_base}" / "branches.jsonl"
     retest = (
         args.diagnostic_results
@@ -727,6 +895,8 @@ def _diagnostic_command(args: argparse.Namespace) -> list[str]:
         command.append("--skip-smoke")
     if args.candidate_scope == "all_retrieved":
         command.append("--all-candidates")
+    if args.diagnostic_scope == "gate_training":
+        command.append("--gate-training-only")
     return command
 
 
@@ -749,6 +919,8 @@ def _train_command(args: argparse.Namespace) -> list[str]:
         "success",
         "--output",
         str(args.checkpoint),
+        "--residual-noise-scale",
+        str(args.residual_noise_scale),
     ]
 
 
@@ -878,11 +1050,21 @@ def _mark_progress(
 def main(argv: Sequence[str] | None = None) -> Path:
     args = parse_args(argv)
     args.data = args.data.resolve()
+    _resolve_data_plan(args)
     args.memory_dir = args.memory_dir.resolve()
     args.diagnostic_results = args.diagnostic_results.resolve()
     args.checkpoint = args.checkpoint.resolve()
     args.output_dir = args.output_dir.resolve()
     _validate_args(args)
+    print(
+        json.dumps(
+            {"experiment_plan": _experiment_plan(args)},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    if args.plan_only:
+        return args.output_dir / "pipeline_manifest.json"
     _prepare_manifest(args)
 
     progress_path = args.output_dir / "pipeline_progress.json"

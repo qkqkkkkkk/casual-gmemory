@@ -60,7 +60,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--exclude-residual-noise",
         action="store_true",
-        help="Ablation only: do not add training residuals to deployment uncertainty",
+        help=(
+            "Deprecated alias for --residual-noise-scale 0; do not add the "
+            "training-residual floor to deployment uncertainty"
+        ),
+    )
+    parser.add_argument(
+        "--residual-noise-scale",
+        type=float,
+        default=None,
+        help=(
+            "Scale applied to the residual uncertainty floor; 0 uses only "
+            "bootstrap-ensemble uncertainty and 1 preserves the legacy floor"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -354,6 +366,20 @@ def _mean_value(row: Mapping[str, Any], scalar: str, samples: str) -> float:
 
 def main(argv: Sequence[str] | None = None) -> Path:
     args = parse_args(argv)
+    if args.residual_noise_scale is not None and args.residual_noise_scale < 0:
+        raise SystemExit("--residual-noise-scale must be non-negative")
+    if args.exclude_residual_noise and args.residual_noise_scale not in (None, 0.0):
+        raise SystemExit(
+            "--exclude-residual-noise conflicts with a nonzero "
+            "--residual-noise-scale"
+        )
+    residual_noise_scale = (
+        0.0
+        if args.exclude_residual_noise
+        else 1.0
+        if args.residual_noise_scale is None
+        else float(args.residual_noise_scale)
+    )
     examples = load_examples(
         args.input,
         metric=args.metric,
@@ -367,7 +393,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
         epochs=args.epochs,
         l2=args.l2,
         seed=args.seed,
-        include_residual_noise=not args.exclude_residual_noise,
+        residual_noise_scale=residual_noise_scale,
     )
     if not estimator.fit(examples):
         raise SystemExit(
@@ -390,6 +416,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
             "candidate_kinds": _candidate_kinds(examples),
             "candidate_ranks": _candidate_ranks(examples),
             "candidate_kind_ranks": _candidate_kind_ranks(examples),
+            "residual_noise_scale": residual_noise_scale,
             "training_contexts": _training_contexts(args.input),
         },
     )
@@ -409,6 +436,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
                 "checkpoint": str(args.output),
                 "training_events": len(examples),
                 "metric": args.metric,
+                "residual_noise_scale": residual_noise_scale,
                 "held_in_utility_rmse": utility_rmse,
                 "warning": "held-in fit is diagnostic only; evaluate on disjoint tasks",
             },

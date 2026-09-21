@@ -64,6 +64,7 @@ class FeverGateComparisonTests(unittest.TestCase):
             )
 
             self.assertIn("--all-candidates", diagnostic)
+            self.assertIn("--gate-training-only", diagnostic)
             self.assertEqual(
                 learned[learned.index("--candidate-kinds") + 1],
                 "trajectory,insight",
@@ -72,6 +73,49 @@ class FeverGateComparisonTests(unittest.TestCase):
                 comparison._expected_candidate_kind_ranks(args),
                 {"trajectory": [1, 2, 3], "insight": [1, 2, 3]},
             )
+            train = comparison._train_command(args)
+            self.assertEqual(
+                train[train.index("--residual-noise-scale") + 1], "0.0"
+            )
+            self.assertEqual(args.kappa, 0.5)
+
+    def test_all_binary_data_is_partitioned_without_leakage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "fever.jsonl"
+            rows = [
+                {"id": index, "claim": f"claim {index}", "label": label}
+                for index, label in enumerate(
+                    ["SUPPORTS"] * 5
+                    + ["REFUTES"] * 5
+                    + ["NOT ENOUGH INFO"] * 3
+                )
+            ]
+            data.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            args = comparison.parse_args(
+                [
+                    "--data",
+                    str(data),
+                    "--support-per-label",
+                    "1",
+                    "--use-all-binary-data",
+                    "--training-fraction",
+                    "0.5",
+                ]
+            )
+            comparison._resolve_data_plan(args)
+            plan = comparison._experiment_plan(args)
+
+            self.assertEqual(args.evaluation_per_label, 4)
+            self.assertEqual(args.training_claims, 4)
+            self.assertEqual(plan["support_claims"], 2)
+            self.assertEqual(plan["gate_training_claims"], 4)
+            self.assertEqual(plan["final_evaluation_claims"], 4)
+            self.assertEqual(plan["binary_examples_used"], 10)
+            self.assertEqual(plan["binary_examples_unused"], 0)
 
     def test_single_scope_preserves_legacy_candidate_selection(self):
         with tempfile.TemporaryDirectory() as directory:

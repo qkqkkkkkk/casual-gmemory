@@ -14,6 +14,18 @@ from causal_memory_control import (
 
 
 class EstimatorTests(unittest.TestCase):
+    @staticmethod
+    def _noisy_examples() -> list[PotentialOutcomeExample]:
+        return [
+            PotentialOutcomeExample(
+                {"x": float(index % 3)},
+                q_use=float(index % 2),
+                q_drop=float((index + 1) % 2),
+                event_id=f"noise-{index}",
+            )
+            for index in range(12)
+        ]
+
     def test_two_potential_outcomes_are_learned(self) -> None:
         examples = []
         for index in range(40):
@@ -45,6 +57,39 @@ class EstimatorTests(unittest.TestCase):
         decision = RelianceController(delta=0.1, kappa=1.0).decide(prediction)
         self.assertFalse(prediction.calibrated)
         self.assertEqual(decision.action, RelianceAction.VERIFY)
+
+    def test_residual_noise_scale_removes_only_the_uncertainty_floor(self) -> None:
+        legacy = AmortizedUtilityEstimator(
+            ensemble_size=4,
+            min_samples=4,
+            epochs=20,
+            seed=9,
+            residual_noise_scale=1.0,
+        )
+        ensemble_only = AmortizedUtilityEstimator(
+            ensemble_size=4,
+            min_samples=4,
+            epochs=20,
+            seed=9,
+            residual_noise_scale=0.0,
+        )
+        examples = self._noisy_examples()
+        self.assertTrue(legacy.fit(examples))
+        self.assertTrue(ensemble_only.fit(examples))
+
+        legacy_prediction = legacy.predict({"x": 1.0})
+        ensemble_prediction = ensemble_only.predict({"x": 1.0})
+        self.assertAlmostEqual(
+            legacy_prediction.utility, ensemble_prediction.utility
+        )
+        self.assertGreater(
+            legacy_prediction.uncertainty,
+            ensemble_prediction.uncertainty,
+        )
+        restored = AmortizedUtilityEstimator.from_dict(
+            ensemble_only.to_dict()
+        )
+        self.assertEqual(restored.residual_noise_scale, 0.0)
 
 
 class ControllerTests(unittest.TestCase):
@@ -101,4 +146,3 @@ class OracleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
