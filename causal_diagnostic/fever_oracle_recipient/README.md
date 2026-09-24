@@ -222,3 +222,33 @@ The diagnostic defaults (`temperature=0.7`, six paired repeats, 40 events)
 follow the RQ3/RQ4 pilot design. RQ2 uses the same `use_all/global_drop`
 rollouts as its MacNet anchor; RQ3 and RQ4 share the isolated-exposure
 rollouts, so RQ4 adds scoring but no extra model calls.
+
+## Continuous outcomes
+
+Existing v3 results can be rescored for final-decision evidence-page F1 with
+no model calls:
+
+```bash
+python -m causal_diagnostic.fever_oracle_recipient.decision_evidence_analysis \
+  --results causal_diagnostic/results/native_fever_rq234_pilot_7b_v3/seed0 \
+  --retest-results causal_diagnostic/results/native_fever_rq234_pilot_7b_v3/seed1000_retest \
+  --output-dir causal_diagnostic/results/native_fever_rq234_pilot_7b_v3/decision_evidence_review
+```
+
+This reports `U_decision-evidence = F1(only_i) - F1(global_drop)`. It is an
+evidence-output sensitivity measure, not a label probability.
+
+True label-probability sensitivity requires a new scoring call because legacy
+caches contain only generated text. First probe the endpoint:
+
+```bash
+python -m causal_diagnostic.fever_oracle_recipient.probe_logprobs \
+  --endpoint http://127.0.0.1:11436/v1 \
+  --model qwen2.5:7b
+```
+
+Only if the probe prints `"status": "supported"`, add
+`--label-probabilities --label-top-logprobs 5` to both seed-0 and seed-1000
+commands and use new output directories. The runner records the binary-
+normalized gold-label probability and gold-label log odds for every branch;
+it fails closed if either A or B is absent from `top_logprobs`.

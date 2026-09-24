@@ -12,7 +12,7 @@ import random
 from typing import Any, Mapping, Sequence
 
 
-ANALYSIS_SCHEMA = "gmemory-macnet-rq234-analysis-v3"
+ANALYSIS_SCHEMA = "gmemory-macnet-rq234-analysis-v4"
 
 
 class AnalysisError(ValueError):
@@ -136,7 +136,26 @@ def build_events(
                 f"event {(task_id, candidate_id)} has unmatched repeats"
             )
         repeat_indices = sorted(repeat_sets[0])
-        outcome_names = ("team_score", "success", "reward", "steps")
+        optional_names = tuple(
+            name
+            for name in (
+                "team_probability_score",
+                "team_margin_score",
+                "decision_evidence_f1",
+            )
+            if all(
+                name in conditions[condition][repeat].get("outcome", {})
+                for condition in required
+                for repeat in repeat_indices
+            )
+        )
+        outcome_names = (
+            "team_score",
+            "success",
+            "reward",
+            "steps",
+            *optional_names,
+        )
         outcomes: dict[str, Any] = {}
         for condition in required:
             samples = {
@@ -622,6 +641,27 @@ def analyze_run(
             events, recipients, metric="success", delta=delta, estimate=estimate
         ),
     }
+    optional_metrics = (
+        ("label_probability_sensitivity", "team_probability_score"),
+        ("label_margin_sensitivity", "team_margin_score"),
+        ("decision_evidence_sensitivity", "decision_evidence_f1"),
+    )
+    for key, metric in optional_metrics:
+        if all(
+            metric in outcome
+            for event in events
+            for outcome in event["outcomes"].values()
+        ):
+            rq2[key] = _oracle_summary(
+                events, metric=metric, delta=delta, estimate=estimate
+            )
+            rq3[key] = _recipient_summary(
+                events,
+                recipients,
+                metric=metric,
+                delta=delta,
+                estimate=estimate,
+            )
     rq4: dict[str, Any] = {
         "status": "not_available",
         "reason": "isolated exposure with objective local metrics is required",
@@ -1182,6 +1222,32 @@ def _report(payload: Mapping[str, Any]) -> str:
                 percent_score=True,
             )
         )
+    if "team_probability_score" in payload["rq2_policy_tables"]:
+        lines.extend(["", "### Gold-label probability sensitivity", ""])
+        lines.extend(
+            _report_policy_table(
+                payload["rq2_policy_tables"]["team_probability_score"],
+                score_name="Gold-label Probability",
+                percent_score=True,
+            )
+        )
+        lines.extend(
+            [
+                "",
+                "Probability is normalized over the forced one-token choices "
+                "A=SUPPORTS and B=REFUTES; it is an auxiliary scoring "
+                "completion, not a probability reconstructed from the original text.",
+            ]
+        )
+    if "team_margin_score" in payload["rq2_policy_tables"]:
+        lines.extend(["", "### Gold-label log-odds sensitivity", ""])
+        lines.extend(
+            _report_policy_table(
+                payload["rq2_policy_tables"]["team_margin_score"],
+                score_name="Gold-label Log Odds",
+                percent_score=False,
+            )
+        )
     lines.extend(
         [
             "",
@@ -1228,6 +1294,25 @@ def _report(payload: Mapping[str, Any]) -> str:
                 "- Split-half reproducibility: unavailable (at least four paired repeats required).",
             ]
         )
+
+    probability_recipient = current["rq3"].get("label_probability_sensitivity")
+    if probability_recipient is not None:
+        lines.extend(
+            [
+                "",
+                "### Recipient gold-label probability utility",
+                "",
+                "| Recipient | Mean probability utility [CI] | Positive | Neutral | Negative |",
+                "|---|---:|---:|---:|---:|",
+            ]
+        )
+        for name in current["recipients"]:
+            row = probability_recipient["per_recipient"][name]
+            lines.append(
+                f"| {name} | {_fmt(row['mean_utility'])} | "
+                f"{row['positive_events']} | {row['neutral_events']} | "
+                f"{row['negative_events']} |"
+            )
 
     rq4 = current.get("rq4", {})
     lines.extend(["", "## RQ4: Objective local-to-team gap", ""])
@@ -1341,11 +1426,16 @@ def _report(payload: Mapping[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _write_matrix(path: Path, analysis: Mapping[str, Any]) -> None:
+def _write_matrix(
+    path: Path,
+    analysis: Mapping[str, Any],
+    *,
+    summary_key: str = "primary_team_score",
+) -> None:
     recipients = tuple(analysis["recipients"])
     rq3_events = {
         event["event_id"]: event
-        for event in analysis["rq3"]["primary_team_score"]["events"]
+        for event in analysis["rq3"][summary_key]["events"]
     }
     fields = ["event_id", "task_id", "candidate_id"]
     for recipient in recipients:
@@ -1525,9 +1615,45 @@ def write_analysis(
             seed=seed + 40_000,
         ),
     }
+    for key, metric, summary_key in (
+        (
+            "team_probability_score",
+            "team_probability_score",
+            "label_probability_sensitivity",
+        ),
+        ("team_margin_score", "team_margin_score", "label_margin_sensitivity"),
+        (
+            "decision_evidence_f1",
+            "decision_evidence_f1",
+            "decision_evidence_sensitivity",
+        ),
+    ):
+        if summary_key in current["rq2"]:
+            payload["rq2_policy_tables"][key] = _rq2_policy_table(
+                current,
+                previous,
+                metric=metric,
+                current_label=current_label,
+                previous_label=previous_label,
+                bootstrap_samples=bootstrap_samples,
+                confidence_level=confidence_level,
+                seed=seed + 50_000 + len(payload["rq2_policy_tables"]),
+            )
     output = results_dir / "oracle_recipient_analysis.json"
     output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     _write_matrix(results_dir / "recipient_matrix.csv", current)
+    if "label_probability_sensitivity" in current["rq3"]:
+        _write_matrix(
+            results_dir / "recipient_probability_matrix.csv",
+            current,
+            summary_key="label_probability_sensitivity",
+        )
+    if "label_margin_sensitivity" in current["rq3"]:
+        _write_matrix(
+            results_dir / "recipient_margin_matrix.csv",
+            current,
+            summary_key="label_margin_sensitivity",
+        )
     _write_rq4_matrix(results_dir / "rq4_local_team_matrix.csv", current)
     _write_policy_table(
         results_dir / "rq2_team_score_policy_table.csv",
@@ -1537,6 +1663,16 @@ def write_analysis(
         results_dir / "rq2_success_policy_table.csv",
         payload["rq2_policy_tables"]["success"],
     )
+    for key in (
+        "team_probability_score",
+        "team_margin_score",
+        "decision_evidence_f1",
+    ):
+        if key in payload["rq2_policy_tables"]:
+            _write_policy_table(
+                results_dir / f"rq2_{key}_policy_table.csv",
+                payload["rq2_policy_tables"][key],
+            )
     (results_dir / "run_report.md").write_text(_report(payload), encoding="utf-8")
     return output
 

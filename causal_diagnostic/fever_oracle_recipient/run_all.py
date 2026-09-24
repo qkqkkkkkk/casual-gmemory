@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-ORCHESTRATOR_SCHEMA = "native-gmemory-macnet-fever-pipeline-v3"
+ORCHESTRATOR_SCHEMA = "native-gmemory-macnet-fever-pipeline-v4"
 
 
 class StageFailure(RuntimeError):
@@ -113,6 +113,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--delta", type=float, default=0.0)
     parser.add_argument("--bootstrap-samples", type=int, default=10_000)
     parser.add_argument("--confidence-level", type=float, default=0.95)
+    parser.add_argument(
+        "--label-probabilities",
+        action="store_true",
+        help="Collect forced A/B gold-label probabilities for every branch",
+    )
+    parser.add_argument("--label-top-logprobs", type=int, default=5)
     return parser.parse_args(argv)
 
 
@@ -142,6 +148,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         )
     if args.temperature < 0:
         raise SystemExit("--temperature must be non-negative")
+    if args.label_top_logprobs < 2:
+        raise SystemExit("--label-top-logprobs must be at least 2")
 
 
 def _candidate_specs(args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -285,6 +293,12 @@ def _validate_completed_run(
             "threshold": args.threshold,
             "embedding_model": args.embedding_model,
             "selection_seed": args.selection_seed,
+            "label_probabilities": bool(args.label_probabilities),
+            "label_top_logprobs": (
+                int(args.label_top_logprobs)
+                if args.label_probabilities
+                else None
+            ),
             "recipients": [
                 value.strip()
                 for value in args.isolated_recipients.split(",")
@@ -471,6 +485,10 @@ def _base_runner_command(
         command.append("--all-candidates")
     if args.gate_training_only:
         command.append("--gate-training-only")
+    if args.label_probabilities:
+        command.extend(
+            ("--label-probabilities", "--label-top-logprobs", str(args.label_top_logprobs))
+        )
     return command
 
 
@@ -517,6 +535,10 @@ def main(argv: Sequence[str] | None = None) -> Path:
         **_candidate_design(args),
         "collection_scope": (
             "gate_training" if args.gate_training_only else "full_causal"
+        ),
+        "label_probabilities": bool(args.label_probabilities),
+        "label_top_logprobs": (
+            int(args.label_top_logprobs) if args.label_probabilities else None
         ),
     }
     state.update(status="running", current_stage=None, updated_at=_timestamp())

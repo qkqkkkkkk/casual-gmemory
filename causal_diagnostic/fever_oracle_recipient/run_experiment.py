@@ -69,12 +69,13 @@ from causal_diagnostic.oracle_recipient.masked_macnet import (
     RecipientMaskedMacNet,
 )
 from causal_diagnostic.oracle_recipient.seeded_client import SeededCachedChat
+from mas.llm import Message
 from mas.memory.mas_memory.GMemory import GMemory
 from mas.reasoning import ReasoningIO
 from mas.utils import EmbeddingFunc
 
 
-RUNNER_SCHEMA = "native-gmemory-macnet-fever-rq234-v3"
+RUNNER_SCHEMA = "native-gmemory-macnet-fever-rq234-v4"
 _ACTIVE_PROGRESS_PATH: Path | None = None
 _ACTIVE_PROGRESS: dict[str, Any] = {}
 
@@ -163,6 +164,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--delta", type=float, default=0.0)
     parser.add_argument("--bootstrap-samples", type=int, default=10_000)
     parser.add_argument("--confidence-level", type=float, default=0.95)
+    parser.add_argument(
+        "--label-probabilities",
+        action="store_true",
+        help=(
+            "Collect a separate forced A/B logprob score for the final decision "
+            "context (A=SUPPORTS, B=REFUTES)"
+        ),
+    )
+    parser.add_argument(
+        "--label-top-logprobs",
+        type=int,
+        default=5,
+        help="Number of alternatives requested from Chat Completions logprobs",
+    )
     parser.add_argument("--retest-results", type=Path, default=None)
     parser.add_argument("--cache-seed-from", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -191,6 +206,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--bootstrap-samples must be at least 100")
     if not 0.0 < args.confidence_level < 1.0:
         raise SystemExit("--confidence-level must be in (0,1)")
+    if args.label_top_logprobs < 2:
+        raise SystemExit("--label-top-logprobs must be at least 2")
     if args.cache_seed_from is not None and not args.cache_seed_from.is_file():
         raise SystemExit(f"cache seed does not exist: {args.cache_seed_from}")
     if args.retest_results is not None:
@@ -519,6 +536,48 @@ def _run_branch(
     before = memory.memory_size
     calls_before, hits_before = client.calls, client.cache_hits
     reward, done = mas.schedule(branch_task)
+    label_score: dict[str, Any] | None = None
+    if args.label_probabilities:
+        if (
+            mas.last_decision_prompt is None
+            or mas.last_decision_system_instruction is None
+        ):
+            client.close()
+            raise RuntimeError("MacNet did not preserve its final decision prompt")
+        score = client.binary_label_probabilities(
+            [
+                Message(
+                    "system",
+                    mas.last_decision_system_instruction
+                    + "\nFor this scoring-only request, override the usual output "
+                    "format and return exactly one character: A for SUPPORTS or "
+                    "B for REFUTES.",
+                ),
+                Message(
+                    "user",
+                    mas.last_decision_prompt
+                    + "\n\nScoring-only answer: output A if the FEVER label is "
+                    "SUPPORTS, or B if it is REFUTES. Output only A or B.",
+                ),
+            ],
+            top_logprobs=args.label_top_logprobs,
+        )
+        gold_label = str(branch_task["label"]).upper()
+        if gold_label == "SUPPORTS":
+            gold_probability = float(score["supports_probability"])
+            gold_log_odds = float(score["supports_log_odds"])
+        elif gold_label == "REFUTES":
+            gold_probability = float(score["refutes_probability"])
+            gold_log_odds = -float(score["supports_log_odds"])
+        else:
+            client.close()
+            raise RuntimeError(f"unsupported binary FEVER label: {gold_label}")
+        label_score = {
+            **score,
+            "gold_label": gold_label,
+            "gold_probability": gold_probability,
+            "gold_log_odds": gold_log_odds,
+        }
     calls = client.calls - calls_before
     hits = client.cache_hits - hits_before
     after = memory.memory_size
@@ -537,7 +596,17 @@ def _run_branch(
         "memory_records_before": before,
         "memory_records_after": after,
     }
+    if label_score is not None:
+        outcome.update(
+            label_probabilities=label_score,
+            team_probability_score=label_score["gold_probability"],
+            team_margin_score=label_score["gold_log_odds"],
+        )
     if not args.gate_training_only:
+        decision_evidence_metric = score_evidence_pages(
+            mas.execution_trace[-1]["decision"]["raw_output"],
+            branch_task.get("gold_evidence_page_sets", []),
+        )
         outcome.update(
             local_metrics={
                 name: score_evidence_pages(
@@ -551,6 +620,8 @@ def _run_branch(
                 for step in mas.execution_trace
             ],
             trace=mas.execution_trace,
+            decision_evidence_metric=decision_evidence_metric,
+            decision_evidence_f1=decision_evidence_metric["f1"],
         )
     return outcome, calls, hits
 
@@ -610,6 +681,10 @@ def main(argv: Sequence[str] | None = None) -> Path:
         "threshold": args.threshold,
         "embedding_model": args.embedding_model,
         "selection_seed": args.selection_seed,
+        "label_probabilities": bool(args.label_probabilities),
+        "label_top_logprobs": (
+            int(args.label_top_logprobs) if args.label_probabilities else None
+        ),
     }
     if args.retest_results is not None:
         args.retest_results = args.retest_results.resolve()

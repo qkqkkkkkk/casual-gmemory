@@ -55,6 +55,8 @@ class RecipientMaskedMacNet(MacNet):
         policy.validate(node.id for node in self._agent_nodes.values())
         self.memory_policy = policy
         self.execution_trace: list[dict[str, Any]] = []
+        self.last_decision_prompt: str | None = None
+        self.last_decision_system_instruction: str | None = None
 
     def set_sampling_temperature(self, temperature: float) -> None:
         for node in (*self._agent_nodes.values(), self._decision_node):
@@ -240,6 +242,13 @@ class RecipientMaskedMacNet(MacNet):
                 decision_pruned_prompt
                 if self.memory_policy.drop_from_decision
                 else decision_full_prompt
+            )
+            # Preserve the exact intervention-specific context used by the
+            # final decision node.  The optional label-probability probe uses
+            # this prompt in a separate forced A/B scoring completion.
+            self.last_decision_prompt = decision_prompt
+            self.last_decision_system_instruction = (
+                self._decision_node._agent.total_system_instruction
             )
             decision_message = Message("user", decision_prompt)
             self._connect_decision_node()

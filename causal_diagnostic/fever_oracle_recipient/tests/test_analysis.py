@@ -179,6 +179,35 @@ class FeverAnalysisTests(unittest.TestCase):
             self.assertEqual(len(lines), 3)
             self.assertIn("reproducible_mismatch", lines[0])
 
+    def test_optional_label_probability_and_margin_utilities(self):
+        rows = _isolated_rows()
+        probabilities = {
+            "use_all": 0.6,
+            "global_drop": 0.4,
+            "only_solver_0": 0.7,
+            "only_solver_2": 0.3,
+        }
+        for row in rows:
+            probability = probabilities[row["condition"]]
+            row["outcome"]["team_probability_score"] = probability
+            row["outcome"]["team_margin_score"] = probability - 0.5
+        analysis = analyze_run(
+            rows,
+            ("solver_0", "solver_2"),
+            bootstrap_samples=200,
+            seed=13,
+        )
+        probability = analysis["rq3"]["label_probability_sensitivity"]
+        self.assertAlmostEqual(
+            probability["per_recipient"]["solver_0"]["mean_utility"]["estimate"],
+            0.3,
+        )
+        self.assertAlmostEqual(
+            probability["per_recipient"]["solver_2"]["mean_utility"]["estimate"],
+            -0.1,
+        )
+        self.assertIn("label_margin_sensitivity", analysis["rq2"])
+
 
 if __name__ == "__main__":
     unittest.main()

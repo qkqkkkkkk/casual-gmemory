@@ -30,6 +30,9 @@ class RunAllTests(unittest.TestCase):
                 "2",
                 "--insights-topk",
                 "3",
+                "--label-probabilities",
+                "--label-top-logprobs",
+                "7",
             )
         )
         design = _candidate_design(args)
@@ -48,6 +51,8 @@ class RunAllTests(unittest.TestCase):
         )
         self.assertIn("--all-candidates", command)
         self.assertIn("--gate-training-only", command)
+        self.assertIn("--label-probabilities", command)
+        self.assertEqual(command[command.index("--label-top-logprobs") + 1], "7")
 
     def test_completion_and_resume_are_derived_from_artifacts(self):
         with tempfile.TemporaryDirectory() as directory:
