@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import warnings
 
 from causal_diagnostic.hotpotqa_oracle_recipient.data import (
     deterministic_split,
@@ -53,6 +54,40 @@ class HotpotDataMetricEnvTests(unittest.TestCase):
         task = prepare_example(evaluation[0])
         self.assertIn("Title: Alpha", task["task_description"])
         self.assertNotIn("Eiffel Tower", task["task_description"])
+
+    def test_duplicate_and_equivalent_titles_use_union_of_sentence_indices(self) -> None:
+        raw = _example(1)
+        raw["context"] = [
+            ["New_York", ["Sentence zero.", "Sentence one."]],
+            ["new york", ["A duplicate-title paragraph."]],
+        ]
+        raw["supporting_facts"] = [[" NEW   YORK ", 1]]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "hotpot.json"
+            path.write_text(json.dumps([raw]), encoding="utf-8")
+            rows = load_hotpotqa(path)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["supporting_facts"], [["NEW   YORK", 1]])
+
+    def test_invalid_support_is_warned_and_excluded_deterministically(self) -> None:
+        invalid = _example(0)
+        invalid["supporting_facts"] = [["Alpha", 99]]
+        values = [invalid] + [_example(index) for index in range(1, 6)]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "hotpot.json"
+            path.write_text(json.dumps(values), encoding="utf-8")
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                rows = load_hotpotqa(path)
+        self.assertEqual([row["id"] for row in rows], [1, 2, 3, 4, 5])
+        self.assertNotIn("hp-0", {row["hotpot_id"] for row in rows})
+        self.assertTrue(any("excluded 1 HotpotQA examples" in str(w.message) for w in caught))
+        first = deterministic_split(rows, support_count=2, evaluation_count=2, seed=42)
+        second = deterministic_split(rows, support_count=2, evaluation_count=2, seed=42)
+        self.assertEqual(
+            [[row["hotpot_id"] for row in split] for split in first],
+            [[row["hotpot_id"] for row in split] for split in second],
+        )
 
     def test_answer_and_supporting_fact_metrics(self) -> None:
         answer = score_answer("The Eiffel Tower", "Eiffel Tower")

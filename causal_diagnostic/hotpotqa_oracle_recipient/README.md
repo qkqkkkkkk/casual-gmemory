@@ -27,7 +27,7 @@ FEVER is neither needed nor valid for free-form HotpotQA answers.
 Place the standard file at:
 
 ```text
-data/hotpotqa/hotpot_dev_distractor_v1.json
+data/hotpotqa/raw/hotpot_dev_distractor_v1.json
 ```
 
 The loader also accepts JSONL. It fails closed when IDs, supplied context, or
@@ -39,7 +39,7 @@ From the repository root, with the model served on port 11436:
 
 ```bash
 python -m causal_diagnostic.run_causal_audit hotpotqa \
-  --data data/hotpotqa/hotpot_dev_distractor_v1.json \
+  --data data/hotpotqa/raw/hotpot_dev_distractor_v1.json \
   --endpoint http://127.0.0.1:11436/v1 \
   --model qwen2.5:7b \
   --memory-dir causal_diagnostic/memory_snapshots/hotpotqa_support50_7b_v1/g-memory \

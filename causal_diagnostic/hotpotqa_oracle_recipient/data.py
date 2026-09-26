@@ -7,10 +7,16 @@ import json
 from pathlib import Path
 import random
 from typing import Any, Iterable, Mapping, Sequence
+import warnings
 
 
 class HotpotDataError(ValueError):
     pass
+
+
+def _title_key(value: str) -> str:
+    """Match HotpotQA titles despite harmless formatting differences."""
+    return " ".join(str(value).replace("_", " ").casefold().split())
 
 
 def file_md5(path: Path) -> str:
@@ -53,6 +59,7 @@ def load_hotpotqa(path: Path) -> list[dict[str, Any]]:
     """Load context-supplied HotpotQA examples with stable integer IDs."""
     examples = []
     seen: set[str] = set()
+    skipped_invalid_support: list[str] = []
     for source_index, raw in enumerate(_raw_rows(path)):
         hotpot_id = str(raw.get("_id", raw.get("id", ""))).strip()
         question = str(raw.get("question", "")).strip()
@@ -65,10 +72,13 @@ def load_hotpotqa(path: Path) -> list[dict[str, Any]]:
             )
         if hotpot_id in seen:
             raise HotpotDataError(f"duplicate HotpotQA id: {hotpot_id}")
+        # Reserve every source ID before any annotation-based exclusion so a
+        # later duplicate cannot silently replace an excluded source row.
+        seen.add(hotpot_id)
         if not isinstance(context, list) or not context:
             raise HotpotDataError(f"HotpotQA {hotpot_id} has no supplied context")
         normalized_context: list[list[Any]] = []
-        context_sizes: dict[str, int] = {}
+        context_indices: dict[str, set[int]] = {}
         for paragraph in context:
             if not isinstance(paragraph, (list, tuple)) or len(paragraph) != 2:
                 raise HotpotDataError(f"HotpotQA {hotpot_id} has invalid context")
@@ -77,24 +87,28 @@ def load_hotpotqa(path: Path) -> list[dict[str, Any]]:
             if not title or not sentences:
                 raise HotpotDataError(f"HotpotQA {hotpot_id} has empty context")
             normalized_context.append([title, sentences])
-            context_sizes[title] = len(sentences)
+            context_indices.setdefault(_title_key(title), set()).update(
+                range(len(sentences))
+            )
         if not isinstance(supporting, list) or not supporting:
             raise HotpotDataError(
                 f"HotpotQA {hotpot_id} has no supporting_facts annotations"
             )
         normalized_supporting = []
+        support_is_outside_context = False
         for fact in supporting:
             if not isinstance(fact, (list, tuple)) or len(fact) != 2:
                 raise HotpotDataError(
                     f"HotpotQA {hotpot_id} has invalid supporting fact"
                 )
             title, sentence_index = str(fact[0]).strip(), int(fact[1])
-            if title not in context_sizes or not 0 <= sentence_index < context_sizes[title]:
-                raise HotpotDataError(
-                    f"HotpotQA {hotpot_id} supporting fact is outside its context"
-                )
+            if sentence_index not in context_indices.get(_title_key(title), set()):
+                support_is_outside_context = True
+                break
             normalized_supporting.append([title, sentence_index])
-        seen.add(hotpot_id)
+        if support_is_outside_context:
+            skipped_invalid_support.append(hotpot_id)
+            continue
         row = dict(raw)
         row.update(
             id=source_index,
@@ -107,6 +121,14 @@ def load_hotpotqa(path: Path) -> list[dict[str, Any]]:
             level=str(raw.get("level", "unknown")),
         )
         examples.append(row)
+    if skipped_invalid_support:
+        warnings.warn(
+            f"excluded {len(skipped_invalid_support)} HotpotQA examples whose "
+            "supporting facts are outside supplied context; first ids="
+            f"{skipped_invalid_support[:5]}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     if not examples:
         raise HotpotDataError(f"no HotpotQA examples found in {path}")
     return examples

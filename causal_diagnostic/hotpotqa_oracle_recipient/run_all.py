@@ -44,7 +44,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--data",
         type=Path,
-        default=Path("data/hotpotqa/hotpot_dev_distractor_v1.json"),
+        default=Path("data/hotpotqa/raw/hotpot_dev_distractor_v1.json"),
     )
     parser.add_argument("--endpoint", default="http://127.0.0.1:11436/v1")
     parser.add_argument("--model", default="qwen2.5:7b")
