@@ -1,0 +1,1504 @@
+{
+  "schema": "fever-gate-drop-harm-audit-v1",
+  "harmful_drop_tasks": 14,
+  "records": [
+    {
+      "task_id": "1596",
+      "task": {
+        "task_main": "FEVER claim: The Bloods was founded in Los Angeles, California.",
+        "task_description": "Offline binary FEVER classification.\nClaim: The Bloods was founded in Los Angeles, California.\nChoose exactly one label and finish with Finish[SUPPORTS] or Finish[REFUTES]. On the preceding line, provide the decisive page titles as Evidence[Page title 1 | Page title 2].",
+        "claim": "The Bloods was founded in Los Angeles, California.",
+        "id": 1596
+      },
+      "gold_label": "SUPPORTS",
+      "baseline_prediction": "SUPPORTS",
+      "gate_prediction": "REFUTES",
+      "baseline_reward": 1.0,
+      "gate_reward": 0.0,
+      "baseline_llm_calls": 10,
+      "baseline_cache_hits": 0,
+      "gate_llm_calls": 4,
+      "gate_cache_hits": 6,
+      "dropped_memories": [
+        {
+          "memory_id": "insight-9518fd56020fda633c98a037",
+          "memory_type": "insight",
+          "retrieval_rank_within_type": 1,
+          "reason": "confidently_harmful",
+          "q_use": 0.6995222056334355,
+          "q_drop": 0.7324327625484434,
+          "utility": -0.03291055691500788,
+          "uncertainty": 0.10116974952844265,
+          "upper_utility_bound": -0.007618119532897219,
+          "memory_found_in_snapshot": true,
+          "memory_last_finish_label": null,
+          "memory": {
+            "kind": "insight",
+            "text": "Ensure selected labels (SUPPORTS or REFUTES) accurately reflect the claim-evidence alignment, because direct evidence should be prioritized to avoid mislabeling.",
+            "content": "Ensure selected labels (SUPPORTS or REFUTES) accurately reflect the claim-evidence alignment, because direct evidence should be prioritized to avoid mislabeling.",
+            "metadata": {
+              "retrieval_index": 0,
+              "legacy_score": 14,
+              "positive_task_count": 21,
+              "negative_task_count": 0,
+              "memory_schema_version": "gmemory-v1"
+            }
+          }
+        }
+      ],
+      "all_gate_decisions": [
+        {
+          "memory_id": "trajectory-41b7e7b06de606e5845ede62",
+          "memory_type": "trajectory",
+          "rank_within_type": 1,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": -0.0030563030092374266,
+          "uncertainty": 0.14577278429098656,
+          "upper_utility_bound": 0.03338689306350921
+        },
+        {
+          "memory_id": "trajectory-b2baa6f43505cd6e5e2d0b51",
+          "memory_type": "trajectory",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.022788705686600852,
+          "uncertainty": 0.10145478950799355,
+          "upper_utility_bound": 0.04815240306359924
+        },
+        {
+          "memory_id": "trajectory-1a2556805cbf27c52fd06308",
+          "memory_type": "trajectory",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.027637465232859704,
+          "uncertainty": 0.1035947650296696,
+          "upper_utility_bound": 0.053536156490277105
+        },
+        {
+          "memory_id": "insight-9518fd56020fda633c98a037",
+          "memory_type": "insight",
+          "rank_within_type": 1,
+          "action": "drop",
+          "reason": "confidently_harmful",
+          "utility": -0.03291055691500788,
+          "uncertainty": 0.10116974952844265,
+          "upper_utility_bound": -0.007618119532897219
+        },
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": -0.012923662549662485,
+          "uncertainty": 0.056898306404094955,
+          "upper_utility_bound": 0.001300914051361254
+        },
+        {
+          "memory_id": "insight-029c6db66f3bf146f8a21570",
+          "memory_type": "insight",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.04371282450314573,
+          "uncertainty": 0.13989729863105144,
+          "upper_utility_bound": 0.07868714916090859
+        }
+      ]
+    },
+    {
+      "task_id": "11405",
+      "task": {
+        "task_main": "FEVER claim: Garden State was an official selection and it was praised.",
+        "task_description": "Offline binary FEVER classification.\nClaim: Garden State was an official selection and it was praised.\nChoose exactly one label and finish with Finish[SUPPORTS] or Finish[REFUTES]. On the preceding line, provide the decisive page titles as Evidence[Page title 1 | Page title 2].",
+        "claim": "Garden State was an official selection and it was praised.",
+        "id": 11405
+      },
+      "gold_label": "SUPPORTS",
+      "baseline_prediction": "SUPPORTS",
+      "gate_prediction": "REFUTES",
+      "baseline_reward": 1.0,
+      "gate_reward": 0.0,
+      "baseline_llm_calls": 10,
+      "baseline_cache_hits": 0,
+      "gate_llm_calls": 4,
+      "gate_cache_hits": 6,
+      "dropped_memories": [
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "retrieval_rank_within_type": 1,
+          "reason": "confidently_harmful",
+          "q_use": 0.6946891382876482,
+          "q_drop": 0.7262836084934748,
+          "utility": -0.03159447020582662,
+          "uncertainty": 0.1032867606791177,
+          "upper_utility_bound": -0.005772780036047195,
+          "memory_found_in_snapshot": true,
+          "memory_last_finish_label": null,
+          "memory": {
+            "kind": "insight",
+            "text": "When choosing between SUPPORTS and REFUTES, ensure evidence directly addresses the claim without ambiguity or indirect inferences, because direct evidence should be prioritized to avoid mislabeling.",
+            "content": "When choosing between SUPPORTS and REFUTES, ensure evidence directly addresses the claim without ambiguity or indirect inferences, because direct evidence should be prioritized to avoid mislabeling.",
+            "metadata": {
+              "retrieval_index": 0,
+              "legacy_score": 10,
+              "positive_task_count": 20,
+              "negative_task_count": 0,
+              "memory_schema_version": "gmemory-v1"
+            }
+          }
+        }
+      ],
+      "all_gate_decisions": [
+        {
+          "memory_id": "trajectory-337f3f1029e1cc5a71582854",
+          "memory_type": "trajectory",
+          "rank_within_type": 1,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.018156323344046932,
+          "uncertainty": 0.1645593464297698,
+          "upper_utility_bound": 0.05929615995148938
+        },
+        {
+          "memory_id": "trajectory-5f6b2522efa2944aa5ef3b81",
+          "memory_type": "trajectory",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.019574690894531677,
+          "uncertainty": 0.11012356630144546,
+          "upper_utility_bound": 0.04710558246989304
+        },
+        {
+          "memory_id": "trajectory-c2ab8615281bed8e67fde471",
+          "memory_type": "trajectory",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.015463109635854067,
+          "uncertainty": 0.11041312421213242,
+          "upper_utility_bound": 0.04306639068888717
+        },
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "rank_within_type": 1,
+          "action": "drop",
+          "reason": "confidently_harmful",
+          "utility": -0.03159447020582662,
+          "uncertainty": 0.1032867606791177,
+          "upper_utility_bound": -0.005772780036047195
+        },
+        {
+          "memory_id": "insight-9518fd56020fda633c98a037",
+          "memory_type": "insight",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "kept_by_max_drops_budget",
+          "utility": -0.014936861560906012,
+          "uncertainty": 0.04752767787391777,
+          "upper_utility_bound": -0.0030549420924265696
+        },
+        {
+          "memory_id": "insight-029c6db66f3bf146f8a21570",
+          "memory_type": "insight",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.043067385968534766,
+          "uncertainty": 0.12859639218764954,
+          "upper_utility_bound": 0.07521648401544714
+        }
+      ]
+    },
+    {
+      "task_id": "57611",
+      "task": {
+        "task_main": "FEVER claim: West Ham United F.C. was founded in this century.",
+        "task_description": "Offline binary FEVER classification.\nClaim: West Ham United F.C. was founded in this century.\nChoose exactly one label and finish with Finish[SUPPORTS] or Finish[REFUTES]. On the preceding line, provide the decisive page titles as Evidence[Page title 1 | Page title 2].",
+        "claim": "West Ham United F.C. was founded in this century.",
+        "id": 57611
+      },
+      "gold_label": "REFUTES",
+      "baseline_prediction": "REFUTES",
+      "gate_prediction": "SUPPORTS",
+      "baseline_reward": 1.0,
+      "gate_reward": 0.0,
+      "baseline_llm_calls": 10,
+      "baseline_cache_hits": 0,
+      "gate_llm_calls": 4,
+      "gate_cache_hits": 6,
+      "dropped_memories": [
+        {
+          "memory_id": "insight-9518fd56020fda633c98a037",
+          "memory_type": "insight",
+          "retrieval_rank_within_type": 1,
+          "reason": "confidently_harmful",
+          "q_use": 0.7132153522525441,
+          "q_drop": 0.7461956238037208,
+          "utility": -0.032980271551176776,
+          "uncertainty": 0.1027090665407715,
+          "upper_utility_bound": -0.007303004915983902,
+          "memory_found_in_snapshot": true,
+          "memory_last_finish_label": null,
+          "memory": {
+            "kind": "insight",
+            "text": "Ensure selected labels (SUPPORTS or REFUTES) accurately reflect the claim-evidence alignment, because direct evidence should be prioritized to avoid mislabeling.",
+            "content": "Ensure selected labels (SUPPORTS or REFUTES) accurately reflect the claim-evidence alignment, because direct evidence should be prioritized to avoid mislabeling.",
+            "metadata": {
+              "retrieval_index": 0,
+              "legacy_score": 14,
+              "positive_task_count": 21,
+              "negative_task_count": 0,
+              "memory_schema_version": "gmemory-v1"
+            }
+          }
+        }
+      ],
+      "all_gate_decisions": [
+        {
+          "memory_id": "trajectory-41b7e7b06de606e5845ede62",
+          "memory_type": "trajectory",
+          "rank_within_type": 1,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": -0.00450827255060926,
+          "uncertainty": 0.13354446928408356,
+          "upper_utility_bound": 0.02887784477041163
+        },
+        {
+          "memory_id": "trajectory-23858f2a255c102d11661cb3",
+          "memory_type": "trajectory",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.02160935456546076,
+          "uncertainty": 0.09370352677877083,
+          "upper_utility_bound": 0.04503523626015347
+        },
+        {
+          "memory_id": "trajectory-5f6b2522efa2944aa5ef3b81",
+          "memory_type": "trajectory",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.03923084307058311,
+          "uncertainty": 0.11198080926174653,
+          "upper_utility_bound": 0.06722604538601974
+        },
+        {
+          "memory_id": "insight-9518fd56020fda633c98a037",
+          "memory_type": "insight",
+          "rank_within_type": 1,
+          "action": "drop",
+          "reason": "confidently_harmful",
+          "utility": -0.032980271551176776,
+          "uncertainty": 0.1027090665407715,
+          "upper_utility_bound": -0.007303004915983902
+        },
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": -0.013760472806843227,
+          "uncertainty": 0.06951309152202383,
+          "upper_utility_bound": 0.0036178000736627296
+        },
+        {
+          "memory_id": "insight-029c6db66f3bf146f8a21570",
+          "memory_type": "insight",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.04457222750322032,
+          "uncertainty": 0.14273494097250602,
+          "upper_utility_bound": 0.08025596274634683
+        }
+      ]
+    },
+    {
+      "task_id": "63627",
+      "task": {
+        "task_main": "FEVER claim: Rhythm Nation was covered by an American singer and songwriter.",
+        "task_description": "Offline binary FEVER classification.\nClaim: Rhythm Nation was covered by an American singer and songwriter.\nChoose exactly one label and finish with Finish[SUPPORTS] or Finish[REFUTES]. On the preceding line, provide the decisive page titles as Evidence[Page title 1 | Page title 2].",
+        "claim": "Rhythm Nation was covered by an American singer and songwriter.",
+        "id": 63627
+      },
+      "gold_label": "SUPPORTS",
+      "baseline_prediction": "SUPPORTS",
+      "gate_prediction": "REFUTES",
+      "baseline_reward": 1.0,
+      "gate_reward": 0.0,
+      "baseline_llm_calls": 10,
+      "baseline_cache_hits": 0,
+      "gate_llm_calls": 4,
+      "gate_cache_hits": 6,
+      "dropped_memories": [
+        {
+          "memory_id": "insight-9518fd56020fda633c98a037",
+          "memory_type": "insight",
+          "retrieval_rank_within_type": 1,
+          "reason": "confidently_harmful",
+          "q_use": 0.7039198295320453,
+          "q_drop": 0.7368313225454779,
+          "utility": -0.03291149301343255,
+          "uncertainty": 0.10132530581797222,
+          "upper_utility_bound": -0.007580166558939491,
+          "memory_found_in_snapshot": true,
+          "memory_last_finish_label": null,
+          "memory": {
+            "kind": "insight",
+            "text": "Ensure selected labels (SUPPORTS or REFUTES) accurately reflect the claim-evidence alignment, because direct evidence should be prioritized to avoid mislabeling.",
+            "content": "Ensure selected labels (SUPPORTS or REFUTES) accurately reflect the claim-evidence alignment, because direct evidence should be prioritized to avoid mislabeling.",
+            "metadata": {
+              "retrieval_index": 0,
+              "legacy_score": 14,
+              "positive_task_count": 21,
+              "negative_task_count": 0,
+              "memory_schema_version": "gmemory-v1"
+            }
+          }
+        }
+      ],
+      "all_gate_decisions": [
+        {
+          "memory_id": "trajectory-db267fa6b5529c4bab4c5122",
+          "memory_type": "trajectory",
+          "rank_within_type": 1,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": -0.01470621827089491,
+          "uncertainty": 0.1463286385180416,
+          "upper_utility_bound": 0.021875941358615487
+        },
+        {
+          "memory_id": "trajectory-4f1f07a4b84a0f5e00f71db2",
+          "memory_type": "trajectory",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.008906363963581576,
+          "uncertainty": 0.0835202387079116,
+          "upper_utility_bound": 0.029786423640559476
+        },
+        {
+          "memory_id": "trajectory-b2baa6f43505cd6e5e2d0b51",
+          "memory_type": "trajectory",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.0398499697636584,
+          "uncertainty": 0.10326516126248705,
+          "upper_utility_bound": 0.06566626007928017
+        },
+        {
+          "memory_id": "insight-9518fd56020fda633c98a037",
+          "memory_type": "insight",
+          "rank_within_type": 1,
+          "action": "drop",
+          "reason": "confidently_harmful",
+          "utility": -0.03291149301343255,
+          "uncertainty": 0.10132530581797222,
+          "upper_utility_bound": -0.007580166558939491
+        },
+        {
+          "memory_id": "insight-d4d0fad6a352544a7d706290",
+          "memory_type": "insight",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.00020186001153310595,
+          "uncertainty": 0.050216764204245416,
+          "upper_utility_bound": 0.01275605106259446
+        },
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.004932980858640246,
+          "uncertainty": 0.0823793521915714,
+          "upper_utility_bound": 0.025527818906533096
+        }
+      ]
+    },
+    {
+      "task_id": "98305",
+      "task": {
+        "task_main": "FEVER claim: Recovery features Rihanna.",
+        "task_description": "Offline binary FEVER classification.\nClaim: Recovery features Rihanna.\nChoose exactly one label and finish with Finish[SUPPORTS] or Finish[REFUTES]. On the preceding line, provide the decisive page titles as Evidence[Page title 1 | Page title 2].",
+        "claim": "Recovery features Rihanna.",
+        "id": 98305
+      },
+      "gold_label": "SUPPORTS",
+      "baseline_prediction": "SUPPORTS",
+      "gate_prediction": "REFUTES",
+      "baseline_reward": 1.0,
+      "gate_reward": 0.0,
+      "baseline_llm_calls": 10,
+      "baseline_cache_hits": 0,
+      "gate_llm_calls": 4,
+      "gate_cache_hits": 6,
+      "dropped_memories": [
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "retrieval_rank_within_type": 1,
+          "reason": "confidently_harmful",
+          "q_use": 0.7213924575500584,
+          "q_drop": 0.7528474358678028,
+          "utility": -0.03145497831774435,
+          "uncertainty": 0.10291129004589986,
+          "upper_utility_bound": -0.005727155806269389,
+          "memory_found_in_snapshot": true,
+          "memory_last_finish_label": null,
+          "memory": {
+            "kind": "insight",
+            "text": "When choosing between SUPPORTS and REFUTES, ensure evidence directly addresses the claim without ambiguity or indirect inferences, because direct evidence should be prioritized to avoid mislabeling.",
+            "content": "When choosing between SUPPORTS and REFUTES, ensure evidence directly addresses the claim without ambiguity or indirect inferences, because direct evidence should be prioritized to avoid mislabeling.",
+            "metadata": {
+              "retrieval_index": 0,
+              "legacy_score": 10,
+              "positive_task_count": 20,
+              "negative_task_count": 0,
+              "memory_schema_version": "gmemory-v1"
+            }
+          }
+        }
+      ],
+      "all_gate_decisions": [
+        {
+          "memory_id": "trajectory-db267fa6b5529c4bab4c5122",
+          "memory_type": "trajectory",
+          "rank_within_type": 1,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": -0.005124513002850661,
+          "uncertainty": 0.130989381102215,
+          "upper_utility_bound": 0.02762283227270309
+        },
+        {
+          "memory_id": "trajectory-4f1f07a4b84a0f5e00f71db2",
+          "memory_type": "trajectory",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.0076968710382657735,
+          "uncertainty": 0.06727348188229659,
+          "upper_utility_bound": 0.02451524150883992
+        },
+        {
+          "memory_id": "trajectory-dbf0cbba7f7a3f9bdfa92106",
+          "memory_type": "trajectory",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.03493692001432269,
+          "uncertainty": 0.09006908328522983,
+          "upper_utility_bound": 0.05745419083563015
+        },
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "rank_within_type": 1,
+          "action": "drop",
+          "reason": "confidently_harmful",
+          "utility": -0.03145497831774435,
+          "uncertainty": 0.10291129004589986,
+          "upper_utility_bound": -0.005727155806269389
+        },
+        {
+          "memory_id": "insight-f4a34a1879752282ce06385d",
+          "memory_type": "insight",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.012175358118779567,
+          "uncertainty": 0.08405408459222288,
+          "upper_utility_bound": 0.03318887926683529
+        },
+        {
+          "memory_id": "insight-9518fd56020fda633c98a037",
+          "memory_type": "insight",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.0035944286868976327,
+          "uncertainty": 0.09621184926664095,
+          "upper_utility_bound": 0.02764739100355787
+        }
+      ]
+    },
+    {
+      "task_id": "112163",
+      "task": {
+        "task_main": "FEVER claim: Knocked Up was released worldwide in 2003.",
+        "task_description": "Offline binary FEVER classification.\nClaim: Knocked Up was released worldwide in 2003.\nChoose exactly one label and finish with Finish[SUPPORTS] or Finish[REFUTES]. On the preceding line, provide the decisive page titles as Evidence[Page title 1 | Page title 2].",
+        "claim": "Knocked Up was released worldwide in 2003.",
+        "id": 112163
+      },
+      "gold_label": "REFUTES",
+      "baseline_prediction": "REFUTES",
+      "gate_prediction": "SUPPORTS",
+      "baseline_reward": 1.0,
+      "gate_reward": 0.0,
+      "baseline_llm_calls": 10,
+      "baseline_cache_hits": 0,
+      "gate_llm_calls": 4,
+      "gate_cache_hits": 6,
+      "dropped_memories": [
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "retrieval_rank_within_type": 1,
+          "reason": "confidently_harmful",
+          "q_use": 0.7357479802168067,
+          "q_drop": 0.7670518954842643,
+          "utility": -0.03130391526745768,
+          "uncertainty": 0.11030895088737376,
+          "upper_utility_bound": -0.0037266775456142424,
+          "memory_found_in_snapshot": true,
+          "memory_last_finish_label": null,
+          "memory": {
+            "kind": "insight",
+            "text": "When choosing between SUPPORTS and REFUTES, ensure evidence directly addresses the claim without ambiguity or indirect inferences, because direct evidence should be prioritized to avoid mislabeling.",
+            "content": "When choosing between SUPPORTS and REFUTES, ensure evidence directly addresses the claim without ambiguity or indirect inferences, because direct evidence should be prioritized to avoid mislabeling.",
+            "metadata": {
+              "retrieval_index": 0,
+              "legacy_score": 10,
+              "positive_task_count": 20,
+              "negative_task_count": 0,
+              "memory_schema_version": "gmemory-v1"
+            }
+          }
+        }
+      ],
+      "all_gate_decisions": [
+        {
+          "memory_id": "trajectory-41b7e7b06de606e5845ede62",
+          "memory_type": "trajectory",
+          "rank_within_type": 1,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.000875236077473196,
+          "uncertainty": 0.12574206869016583,
+          "upper_utility_bound": 0.03231075325001465
+        },
+        {
+          "memory_id": "trajectory-aa5c066c1734d9f72e0888be",
+          "memory_type": "trajectory",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.014291091974440784,
+          "uncertainty": 0.07969905542281994,
+          "upper_utility_bound": 0.03421585583014577
+        },
+        {
+          "memory_id": "trajectory-db267fa6b5529c4bab4c5122",
+          "memory_type": "trajectory",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.020249631366890508,
+          "uncertainty": 0.09355517243877765,
+          "upper_utility_bound": 0.04363842447658492
+        },
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "rank_within_type": 1,
+          "action": "drop",
+          "reason": "confidently_harmful",
+          "utility": -0.03130391526745768,
+          "uncertainty": 0.11030895088737376,
+          "upper_utility_bound": -0.0037266775456142424
+        },
+        {
+          "memory_id": "insight-9518fd56020fda633c98a037",
+          "memory_type": "insight",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": -0.014438999822641074,
+          "uncertainty": 0.07280528010049814,
+          "upper_utility_bound": 0.00376232020248346
+        },
+        {
+          "memory_id": "insight-d4d0fad6a352544a7d706290",
+          "memory_type": "insight",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.01698916651012239,
+          "uncertainty": 0.11256778706626475,
+          "upper_utility_bound": 0.045131113276688575
+        }
+      ]
+    },
+    {
+      "task_id": "119935",
+      "task": {
+        "task_main": "FEVER claim: Atlanta, Georgia is a place where Due Date was shot.",
+        "task_description": "Offline binary FEVER classification.\nClaim: Atlanta, Georgia is a place where Due Date was shot.\nChoose exactly one label and finish with Finish[SUPPORTS] or Finish[REFUTES]. On the preceding line, provide the decisive page titles as Evidence[Page title 1 | Page title 2].",
+        "claim": "Atlanta, Georgia is a place where Due Date was shot.",
+        "id": 119935
+      },
+      "gold_label": "SUPPORTS",
+      "baseline_prediction": "SUPPORTS",
+      "gate_prediction": "REFUTES",
+      "baseline_reward": 1.0,
+      "gate_reward": 0.0,
+      "baseline_llm_calls": 10,
+      "baseline_cache_hits": 0,
+      "gate_llm_calls": 4,
+      "gate_cache_hits": 6,
+      "dropped_memories": [
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "retrieval_rank_within_type": 1,
+          "reason": "confidently_harmful",
+          "q_use": 0.7139473079327096,
+          "q_drop": 0.7456184133752372,
+          "utility": -0.0316711054425276,
+          "uncertainty": 0.10297568376339954,
+          "upper_utility_bound": -0.005927184501677719,
+          "memory_found_in_snapshot": true,
+          "memory_last_finish_label": null,
+          "memory": {
+            "kind": "insight",
+            "text": "When choosing between SUPPORTS and REFUTES, ensure evidence directly addresses the claim without ambiguity or indirect inferences, because direct evidence should be prioritized to avoid mislabeling.",
+            "content": "When choosing between SUPPORTS and REFUTES, ensure evidence directly addresses the claim without ambiguity or indirect inferences, because direct evidence should be prioritized to avoid mislabeling.",
+            "metadata": {
+              "retrieval_index": 0,
+              "legacy_score": 10,
+              "positive_task_count": 20,
+              "negative_task_count": 0,
+              "memory_schema_version": "gmemory-v1"
+            }
+          }
+        }
+      ],
+      "all_gate_decisions": [
+        {
+          "memory_id": "trajectory-41b7e7b06de606e5845ede62",
+          "memory_type": "trajectory",
+          "rank_within_type": 1,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": -0.004410361506816951,
+          "uncertainty": 0.13289836794428653,
+          "upper_utility_bound": 0.02881423047925468
+        },
+        {
+          "memory_id": "trajectory-5f6b2522efa2944aa5ef3b81",
+          "memory_type": "trajectory",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.021262008104727337,
+          "uncertainty": 0.09456398006382247,
+          "upper_utility_bound": 0.044903003120682954
+        },
+        {
+          "memory_id": "trajectory-337f3f1029e1cc5a71582854",
+          "memory_type": "trajectory",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.05649097639367162,
+          "uncertainty": 0.10404250828350224,
+          "upper_utility_bound": 0.08250160346454719
+        },
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "rank_within_type": 1,
+          "action": "drop",
+          "reason": "confidently_harmful",
+          "utility": -0.0316711054425276,
+          "uncertainty": 0.10297568376339954,
+          "upper_utility_bound": -0.005927184501677719
+        },
+        {
+          "memory_id": "insight-9518fd56020fda633c98a037",
+          "memory_type": "insight",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "kept_by_max_drops_budget",
+          "utility": -0.014812913992834242,
+          "uncertainty": 0.05857950520314985,
+          "upper_utility_bound": -0.00016803769204678035
+        },
+        {
+          "memory_id": "insight-029c6db66f3bf146f8a21570",
+          "memory_type": "insight",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.04321438852631354,
+          "uncertainty": 0.14206468684895288,
+          "upper_utility_bound": 0.07873056023855177
+        }
+      ]
+    },
+    {
+      "task_id": "127048",
+      "task": {
+        "task_main": "FEVER claim: Hush (2016 film) was produced by Intrepid Pictures.",
+        "task_description": "Offline binary FEVER classification.\nClaim: Hush (2016 film) was produced by Intrepid Pictures.\nChoose exactly one label and finish with Finish[SUPPORTS] or Finish[REFUTES]. On the preceding line, provide the decisive page titles as Evidence[Page title 1 | Page title 2].",
+        "claim": "Hush (2016 film) was produced by Intrepid Pictures.",
+        "id": 127048
+      },
+      "gold_label": "SUPPORTS",
+      "baseline_prediction": "SUPPORTS",
+      "gate_prediction": "REFUTES",
+      "baseline_reward": 1.0,
+      "gate_reward": 0.0,
+      "baseline_llm_calls": 10,
+      "baseline_cache_hits": 0,
+      "gate_llm_calls": 4,
+      "gate_cache_hits": 6,
+      "dropped_memories": [
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "retrieval_rank_within_type": 1,
+          "reason": "confidently_harmful",
+          "q_use": 0.7188291624729284,
+          "q_drop": 0.7499556606859009,
+          "utility": -0.03112649821297253,
+          "uncertainty": 0.10556307703447063,
+          "upper_utility_bound": -0.0047357289543548745,
+          "memory_found_in_snapshot": true,
+          "memory_last_finish_label": null,
+          "memory": {
+            "kind": "insight",
+            "text": "When choosing between SUPPORTS and REFUTES, ensure evidence directly addresses the claim without ambiguity or indirect inferences, because direct evidence should be prioritized to avoid mislabeling.",
+            "content": "When choosing between SUPPORTS and REFUTES, ensure evidence directly addresses the claim without ambiguity or indirect inferences, because direct evidence should be prioritized to avoid mislabeling.",
+            "metadata": {
+              "retrieval_index": 0,
+              "legacy_score": 10,
+              "positive_task_count": 20,
+              "negative_task_count": 0,
+              "memory_schema_version": "gmemory-v1"
+            }
+          }
+        }
+      ],
+      "all_gate_decisions": [
+        {
+          "memory_id": "trajectory-aa5c066c1734d9f72e0888be",
+          "memory_type": "trajectory",
+          "rank_within_type": 1,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.0003402118152722178,
+          "uncertainty": 0.1332445444081591,
+          "upper_utility_bound": 0.033651347917311995
+        },
+        {
+          "memory_id": "trajectory-c38d4ff91c5564173a15caf7",
+          "memory_type": "trajectory",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.01961182375218451,
+          "uncertainty": 0.0903820155354691,
+          "upper_utility_bound": 0.042207327636051784
+        },
+        {
+          "memory_id": "trajectory-76d2100dcfe2a7ed3b76042c",
+          "memory_type": "trajectory",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.0337343090709179,
+          "uncertainty": 0.09372330398083245,
+          "upper_utility_bound": 0.05716513506612601
+        },
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "rank_within_type": 1,
+          "action": "drop",
+          "reason": "confidently_harmful",
+          "utility": -0.03112649821297253,
+          "uncertainty": 0.10556307703447063,
+          "upper_utility_bound": -0.0047357289543548745
+        },
+        {
+          "memory_id": "insight-9518fd56020fda633c98a037",
+          "memory_type": "insight",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "kept_by_max_drops_budget",
+          "utility": -0.014497564561705367,
+          "uncertainty": 0.0520537210061025,
+          "upper_utility_bound": -0.0014841343101797428
+        },
+        {
+          "memory_id": "insight-d4d0fad6a352544a7d706290",
+          "memory_type": "insight",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.016932290578084874,
+          "uncertainty": 0.09223820165495794,
+          "upper_utility_bound": 0.03999184099182436
+        }
+      ]
+    },
+    {
+      "task_id": "128768",
+      "task": {
+        "task_main": "FEVER claim: In the 1960's, Heavy Metal music was developed.",
+        "task_description": "Offline binary FEVER classification.\nClaim: In the 1960's, Heavy Metal music was developed.\nChoose exactly one label and finish with Finish[SUPPORTS] or Finish[REFUTES]. On the preceding line, provide the decisive page titles as Evidence[Page title 1 | Page title 2].",
+        "claim": "In the 1960's, Heavy Metal music was developed.",
+        "id": 128768
+      },
+      "gold_label": "SUPPORTS",
+      "baseline_prediction": "SUPPORTS",
+      "gate_prediction": "REFUTES",
+      "baseline_reward": 1.0,
+      "gate_reward": 0.0,
+      "baseline_llm_calls": 10,
+      "baseline_cache_hits": 0,
+      "gate_llm_calls": 4,
+      "gate_cache_hits": 6,
+      "dropped_memories": [
+        {
+          "memory_id": "insight-9518fd56020fda633c98a037",
+          "memory_type": "insight",
+          "retrieval_rank_within_type": 2,
+          "reason": "confidently_harmful",
+          "q_use": 0.7227926311878949,
+          "q_drop": 0.737639618341619,
+          "utility": -0.014846987153724012,
+          "uncertainty": 0.04682384412351518,
+          "upper_utility_bound": -0.0031410261228452165,
+          "memory_found_in_snapshot": true,
+          "memory_last_finish_label": null,
+          "memory": {
+            "kind": "insight",
+            "text": "Ensure selected labels (SUPPORTS or REFUTES) accurately reflect the claim-evidence alignment, because direct evidence should be prioritized to avoid mislabeling.",
+            "content": "Ensure selected labels (SUPPORTS or REFUTES) accurately reflect the claim-evidence alignment, because direct evidence should be prioritized to avoid mislabeling.",
+            "metadata": {
+              "retrieval_index": 0,
+              "legacy_score": 14,
+              "positive_task_count": 21,
+              "negative_task_count": 0,
+              "memory_schema_version": "gmemory-v1"
+            }
+          }
+        }
+      ],
+      "all_gate_decisions": [
+        {
+          "memory_id": "trajectory-4f1f07a4b84a0f5e00f71db2",
+          "memory_type": "trajectory",
+          "rank_within_type": 1,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": -0.0038620197237152487,
+          "uncertainty": 0.1284917472486079,
+          "upper_utility_bound": 0.028260917088436727
+        },
+        {
+          "memory_id": "trajectory-82f712c4bb3cde7bf1e596d0",
+          "memory_type": "trajectory",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.028845776586298832,
+          "uncertainty": 0.10150082770699008,
+          "upper_utility_bound": 0.054220983513046356
+        },
+        {
+          "memory_id": "trajectory-23858f2a255c102d11661cb3",
+          "memory_type": "trajectory",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.041572848937966644,
+          "uncertainty": 0.10814820328048665,
+          "upper_utility_bound": 0.0686098997580883
+        },
+        {
+          "memory_id": "insight-d4d0fad6a352544a7d706290",
+          "memory_type": "insight",
+          "rank_within_type": 1,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": -0.012004639320284172,
+          "uncertainty": 0.10275759693150871,
+          "upper_utility_bound": 0.013684759912593006
+        },
+        {
+          "memory_id": "insight-9518fd56020fda633c98a037",
+          "memory_type": "insight",
+          "rank_within_type": 2,
+          "action": "drop",
+          "reason": "confidently_harmful",
+          "utility": -0.014846987153724012,
+          "uncertainty": 0.04682384412351518,
+          "upper_utility_bound": -0.0031410261228452165
+        },
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.004582091822178169,
+          "uncertainty": 0.08459124725053761,
+          "upper_utility_bound": 0.025729903634812572
+        }
+      ]
+    },
+    {
+      "task_id": "132473",
+      "task": {
+        "task_main": "FEVER claim: Psych takes place in the United States.",
+        "task_description": "Offline binary FEVER classification.\nClaim: Psych takes place in the United States.\nChoose exactly one label and finish with Finish[SUPPORTS] or Finish[REFUTES]. On the preceding line, provide the decisive page titles as Evidence[Page title 1 | Page title 2].",
+        "claim": "Psych takes place in the United States.",
+        "id": 132473
+      },
+      "gold_label": "SUPPORTS",
+      "baseline_prediction": "SUPPORTS",
+      "gate_prediction": "REFUTES",
+      "baseline_reward": 1.0,
+      "gate_reward": 0.0,
+      "baseline_llm_calls": 10,
+      "baseline_cache_hits": 0,
+      "gate_llm_calls": 4,
+      "gate_cache_hits": 6,
+      "dropped_memories": [
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "retrieval_rank_within_type": 1,
+          "reason": "confidently_harmful",
+          "q_use": 0.70492978944324,
+          "q_drop": 0.7364777353587536,
+          "utility": -0.031547945915513576,
+          "uncertainty": 0.10051005853816984,
+          "upper_utility_bound": -0.006420431280971115,
+          "memory_found_in_snapshot": true,
+          "memory_last_finish_label": null,
+          "memory": {
+            "kind": "insight",
+            "text": "When choosing between SUPPORTS and REFUTES, ensure evidence directly addresses the claim without ambiguity or indirect inferences, because direct evidence should be prioritized to avoid mislabeling.",
+            "content": "When choosing between SUPPORTS and REFUTES, ensure evidence directly addresses the claim without ambiguity or indirect inferences, because direct evidence should be prioritized to avoid mislabeling.",
+            "metadata": {
+              "retrieval_index": 0,
+              "legacy_score": 10,
+              "positive_task_count": 20,
+              "negative_task_count": 0,
+              "memory_schema_version": "gmemory-v1"
+            }
+          }
+        }
+      ],
+      "all_gate_decisions": [
+        {
+          "memory_id": "trajectory-41b7e7b06de606e5845ede62",
+          "memory_type": "trajectory",
+          "rank_within_type": 1,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": -0.0037754808123502404,
+          "uncertainty": 0.14446736456050213,
+          "upper_utility_bound": 0.03234136032777529
+        },
+        {
+          "memory_id": "trajectory-c2ab8615281bed8e67fde471",
+          "memory_type": "trajectory",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": -0.0023133946014953777,
+          "uncertainty": 0.10121750950642613,
+          "upper_utility_bound": 0.022990982775111156
+        },
+        {
+          "memory_id": "trajectory-5f6b2522efa2944aa5ef3b81",
+          "memory_type": "trajectory",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.038823774799665145,
+          "uncertainty": 0.10521691374309822,
+          "upper_utility_bound": 0.0651280032354397
+        },
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "rank_within_type": 1,
+          "action": "drop",
+          "reason": "confidently_harmful",
+          "utility": -0.031547945915513576,
+          "uncertainty": 0.10051005853816984,
+          "upper_utility_bound": -0.006420431280971115
+        },
+        {
+          "memory_id": "insight-029c6db66f3bf146f8a21570",
+          "memory_type": "insight",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.02560426882124689,
+          "uncertainty": 0.08750142469700818,
+          "upper_utility_bound": 0.04747962499549893
+        },
+        {
+          "memory_id": "insight-9518fd56020fda633c98a037",
+          "memory_type": "insight",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.0038812260090034245,
+          "uncertainty": 0.08559698599676761,
+          "upper_utility_bound": 0.025280472508195328
+        }
+      ]
+    },
+    {
+      "task_id": "156901",
+      "task": {
+        "task_main": "FEVER claim: The United Kingdom developed Heavy Metal music.",
+        "task_description": "Offline binary FEVER classification.\nClaim: The United Kingdom developed Heavy Metal music.\nChoose exactly one label and finish with Finish[SUPPORTS] or Finish[REFUTES]. On the preceding line, provide the decisive page titles as Evidence[Page title 1 | Page title 2].",
+        "claim": "The United Kingdom developed Heavy Metal music.",
+        "id": 156901
+      },
+      "gold_label": "SUPPORTS",
+      "baseline_prediction": "SUPPORTS",
+      "gate_prediction": "REFUTES",
+      "baseline_reward": 1.0,
+      "gate_reward": 0.0,
+      "baseline_llm_calls": 10,
+      "baseline_cache_hits": 0,
+      "gate_llm_calls": 4,
+      "gate_cache_hits": 6,
+      "dropped_memories": [
+        {
+          "memory_id": "insight-9518fd56020fda633c98a037",
+          "memory_type": "insight",
+          "retrieval_rank_within_type": 2,
+          "reason": "confidently_harmful",
+          "q_use": 0.7335563848338184,
+          "q_drop": 0.7481891133322964,
+          "utility": -0.014632728498478076,
+          "uncertainty": 0.04778948480831458,
+          "upper_utility_bound": -0.0026853572963994304,
+          "memory_found_in_snapshot": true,
+          "memory_last_finish_label": null,
+          "memory": {
+            "kind": "insight",
+            "text": "Ensure selected labels (SUPPORTS or REFUTES) accurately reflect the claim-evidence alignment, because direct evidence should be prioritized to avoid mislabeling.",
+            "content": "Ensure selected labels (SUPPORTS or REFUTES) accurately reflect the claim-evidence alignment, because direct evidence should be prioritized to avoid mislabeling.",
+            "metadata": {
+              "retrieval_index": 0,
+              "legacy_score": 14,
+              "positive_task_count": 21,
+              "negative_task_count": 0,
+              "memory_schema_version": "gmemory-v1"
+            }
+          }
+        }
+      ],
+      "all_gate_decisions": [
+        {
+          "memory_id": "trajectory-4f1f07a4b84a0f5e00f71db2",
+          "memory_type": "trajectory",
+          "rank_within_type": 1,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": -0.008905213670313161,
+          "uncertainty": 0.12336162646253708,
+          "upper_utility_bound": 0.02193519294532111
+        },
+        {
+          "memory_id": "trajectory-b2baa6f43505cd6e5e2d0b51",
+          "memory_type": "trajectory",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.02153107470962956,
+          "uncertainty": 0.09601334888930849,
+          "upper_utility_bound": 0.04553441193195668
+        },
+        {
+          "memory_id": "trajectory-db267fa6b5529c4bab4c5122",
+          "memory_type": "trajectory",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.022050090244402187,
+          "uncertainty": 0.09884126192560692,
+          "upper_utility_bound": 0.04676040572580392
+        },
+        {
+          "memory_id": "insight-d4d0fad6a352544a7d706290",
+          "memory_type": "insight",
+          "rank_within_type": 1,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": -0.017596245377350495,
+          "uncertainty": 0.10296003432810874,
+          "upper_utility_bound": 0.00814376320467669
+        },
+        {
+          "memory_id": "insight-9518fd56020fda633c98a037",
+          "memory_type": "insight",
+          "rank_within_type": 2,
+          "action": "drop",
+          "reason": "confidently_harmful",
+          "utility": -0.014632728498478076,
+          "uncertainty": 0.04778948480831458,
+          "upper_utility_bound": -0.0026853572963994304
+        },
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.004786769201171381,
+          "uncertainty": 0.08542146789934922,
+          "upper_utility_bound": 0.026142136176008687
+        }
+      ]
+    },
+    {
+      "task_id": "191445",
+      "task": {
+        "task_main": "FEVER claim: Keith Urban was released by a record label.",
+        "task_description": "Offline binary FEVER classification.\nClaim: Keith Urban was released by a record label.\nChoose exactly one label and finish with Finish[SUPPORTS] or Finish[REFUTES]. On the preceding line, provide the decisive page titles as Evidence[Page title 1 | Page title 2].",
+        "claim": "Keith Urban was released by a record label.",
+        "id": 191445
+      },
+      "gold_label": "SUPPORTS",
+      "baseline_prediction": "SUPPORTS",
+      "gate_prediction": "REFUTES",
+      "baseline_reward": 1.0,
+      "gate_reward": 0.0,
+      "baseline_llm_calls": 10,
+      "baseline_cache_hits": 0,
+      "gate_llm_calls": 4,
+      "gate_cache_hits": 6,
+      "dropped_memories": [
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "retrieval_rank_within_type": 1,
+          "reason": "confidently_harmful",
+          "q_use": 0.6959423382009153,
+          "q_drop": 0.7278767281025488,
+          "utility": -0.03193438990163344,
+          "uncertainty": 0.10109248310344361,
+          "upper_utility_bound": -0.006661269125772539,
+          "memory_found_in_snapshot": true,
+          "memory_last_finish_label": null,
+          "memory": {
+            "kind": "insight",
+            "text": "When choosing between SUPPORTS and REFUTES, ensure evidence directly addresses the claim without ambiguity or indirect inferences, because direct evidence should be prioritized to avoid mislabeling.",
+            "content": "When choosing between SUPPORTS and REFUTES, ensure evidence directly addresses the claim without ambiguity or indirect inferences, because direct evidence should be prioritized to avoid mislabeling.",
+            "metadata": {
+              "retrieval_index": 0,
+              "legacy_score": 10,
+              "positive_task_count": 20,
+              "negative_task_count": 0,
+              "memory_schema_version": "gmemory-v1"
+            }
+          }
+        }
+      ],
+      "all_gate_decisions": [
+        {
+          "memory_id": "trajectory-db267fa6b5529c4bab4c5122",
+          "memory_type": "trajectory",
+          "rank_within_type": 1,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": -0.008528439654667763,
+          "uncertainty": 0.15125723685715306,
+          "upper_utility_bound": 0.029285869559620502
+        },
+        {
+          "memory_id": "trajectory-23858f2a255c102d11661cb3",
+          "memory_type": "trajectory",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.021021615491469525,
+          "uncertainty": 0.10403698254769068,
+          "upper_utility_bound": 0.04703086112839219
+        },
+        {
+          "memory_id": "trajectory-4f1f07a4b84a0f5e00f71db2",
+          "memory_type": "trajectory",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.028674617510187406,
+          "uncertainty": 0.10194931164832319,
+          "upper_utility_bound": 0.0541619454222682
+        },
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "rank_within_type": 1,
+          "action": "drop",
+          "reason": "confidently_harmful",
+          "utility": -0.03193438990163344,
+          "uncertainty": 0.10109248310344361,
+          "upper_utility_bound": -0.006661269125772539
+        },
+        {
+          "memory_id": "insight-9518fd56020fda633c98a037",
+          "memory_type": "insight",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "kept_by_max_drops_budget",
+          "utility": -0.015072056031297243,
+          "uncertainty": 0.05251799388257486,
+          "upper_utility_bound": -0.001942557560653528
+        },
+        {
+          "memory_id": "insight-d4d0fad6a352544a7d706290",
+          "memory_type": "insight",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.018316919466242032,
+          "uncertainty": 0.08784097433964386,
+          "upper_utility_bound": 0.040277163051152996
+        }
+      ]
+    },
+    {
+      "task_id": "194025",
+      "task": {
+        "task_main": "FEVER claim: Kim Jong-il was proclaimed Eternal Chairman of the National Defence Commission.",
+        "task_description": "Offline binary FEVER classification.\nClaim: Kim Jong-il was proclaimed Eternal Chairman of the National Defence Commission.\nChoose exactly one label and finish with Finish[SUPPORTS] or Finish[REFUTES]. On the preceding line, provide the decisive page titles as Evidence[Page title 1 | Page title 2].",
+        "claim": "Kim Jong-il was proclaimed Eternal Chairman of the National Defence Commission.",
+        "id": 194025
+      },
+      "gold_label": "SUPPORTS",
+      "baseline_prediction": "SUPPORTS",
+      "gate_prediction": "REFUTES",
+      "baseline_reward": 1.0,
+      "gate_reward": 0.0,
+      "baseline_llm_calls": 10,
+      "baseline_cache_hits": 0,
+      "gate_llm_calls": 4,
+      "gate_cache_hits": 6,
+      "dropped_memories": [
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "retrieval_rank_within_type": 1,
+          "reason": "confidently_harmful",
+          "q_use": 0.6745602653044909,
+          "q_drop": 0.707055392554361,
+          "utility": -0.03249512724987014,
+          "uncertainty": 0.10902697999041322,
+          "upper_utility_bound": -0.005238382252266832,
+          "memory_found_in_snapshot": true,
+          "memory_last_finish_label": null,
+          "memory": {
+            "kind": "insight",
+            "text": "When choosing between SUPPORTS and REFUTES, ensure evidence directly addresses the claim without ambiguity or indirect inferences, because direct evidence should be prioritized to avoid mislabeling.",
+            "content": "When choosing between SUPPORTS and REFUTES, ensure evidence directly addresses the claim without ambiguity or indirect inferences, because direct evidence should be prioritized to avoid mislabeling.",
+            "metadata": {
+              "retrieval_index": 0,
+              "legacy_score": 10,
+              "positive_task_count": 20,
+              "negative_task_count": 0,
+              "memory_schema_version": "gmemory-v1"
+            }
+          }
+        }
+      ],
+      "all_gate_decisions": [
+        {
+          "memory_id": "trajectory-41b7e7b06de606e5845ede62",
+          "memory_type": "trajectory",
+          "rank_within_type": 1,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.0036072556657427146,
+          "uncertainty": 0.1498327024062066,
+          "upper_utility_bound": 0.04106543126729437
+        },
+        {
+          "memory_id": "trajectory-0322cd5ede30ea82f4469b19",
+          "memory_type": "trajectory",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.020058720600911073,
+          "uncertainty": 0.10648152818472253,
+          "upper_utility_bound": 0.04667910264709171
+        },
+        {
+          "memory_id": "trajectory-774c1dae68e074aca5a620e9",
+          "memory_type": "trajectory",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.035335286117362696,
+          "uncertainty": 0.11430769229925772,
+          "upper_utility_bound": 0.06391220919217713
+        },
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "rank_within_type": 1,
+          "action": "drop",
+          "reason": "confidently_harmful",
+          "utility": -0.03249512724987014,
+          "uncertainty": 0.10902697999041322,
+          "upper_utility_bound": -0.005238382252266832
+        },
+        {
+          "memory_id": "insight-029c6db66f3bf146f8a21570",
+          "memory_type": "insight",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.025312258478475957,
+          "uncertainty": 0.07591525148459276,
+          "upper_utility_bound": 0.04429107134962415
+        },
+        {
+          "memory_id": "insight-9518fd56020fda633c98a037",
+          "memory_type": "insight",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.002486830206891444,
+          "uncertainty": 0.10446938333736278,
+          "upper_utility_bound": 0.028604176041232138
+        }
+      ]
+    },
+    {
+      "task_id": "216352",
+      "task": {
+        "task_main": "FEVER claim: The Chagatai language is moribund.",
+        "task_description": "Offline binary FEVER classification.\nClaim: The Chagatai language is moribund.\nChoose exactly one label and finish with Finish[SUPPORTS] or Finish[REFUTES]. On the preceding line, provide the decisive page titles as Evidence[Page title 1 | Page title 2].",
+        "claim": "The Chagatai language is moribund.",
+        "id": 216352
+      },
+      "gold_label": "SUPPORTS",
+      "baseline_prediction": "SUPPORTS",
+      "gate_prediction": "REFUTES",
+      "baseline_reward": 1.0,
+      "gate_reward": 0.0,
+      "baseline_llm_calls": 10,
+      "baseline_cache_hits": 0,
+      "gate_llm_calls": 4,
+      "gate_cache_hits": 6,
+      "dropped_memories": [
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "retrieval_rank_within_type": 1,
+          "reason": "confidently_harmful",
+          "q_use": 0.70492978944324,
+          "q_drop": 0.7364777353587536,
+          "utility": -0.031547945915513576,
+          "uncertainty": 0.10051005853816984,
+          "upper_utility_bound": -0.006420431280971115,
+          "memory_found_in_snapshot": true,
+          "memory_last_finish_label": null,
+          "memory": {
+            "kind": "insight",
+            "text": "When choosing between SUPPORTS and REFUTES, ensure evidence directly addresses the claim without ambiguity or indirect inferences, because direct evidence should be prioritized to avoid mislabeling.",
+            "content": "When choosing between SUPPORTS and REFUTES, ensure evidence directly addresses the claim without ambiguity or indirect inferences, because direct evidence should be prioritized to avoid mislabeling.",
+            "metadata": {
+              "retrieval_index": 0,
+              "legacy_score": 10,
+              "positive_task_count": 20,
+              "negative_task_count": 0,
+              "memory_schema_version": "gmemory-v1"
+            }
+          }
+        }
+      ],
+      "all_gate_decisions": [
+        {
+          "memory_id": "trajectory-dbf0cbba7f7a3f9bdfa92106",
+          "memory_type": "trajectory",
+          "rank_within_type": 1,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": -0.004861911669948316,
+          "uncertainty": 0.16008142132833764,
+          "upper_utility_bound": 0.035158443662136094
+        },
+        {
+          "memory_id": "trajectory-fda4647c030e89eea5eb7ca7",
+          "memory_type": "trajectory",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.0026846348718261304,
+          "uncertainty": 0.11967436048805202,
+          "upper_utility_bound": 0.032603224993839136
+        },
+        {
+          "memory_id": "trajectory-41b7e7b06de606e5845ede62",
+          "memory_type": "trajectory",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.03592453398915607,
+          "uncertainty": 0.10165305658045305,
+          "upper_utility_bound": 0.06133779813426933
+        },
+        {
+          "memory_id": "insight-80de03c7e01714ce0f90eb64",
+          "memory_type": "insight",
+          "rank_within_type": 1,
+          "action": "drop",
+          "reason": "confidently_harmful",
+          "utility": -0.031547945915513576,
+          "uncertainty": 0.10051005853816984,
+          "upper_utility_bound": -0.006420431280971115
+        },
+        {
+          "memory_id": "insight-029c6db66f3bf146f8a21570",
+          "memory_type": "insight",
+          "rank_within_type": 2,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.02623430808267324,
+          "uncertainty": 0.08333522288162545,
+          "upper_utility_bound": 0.047068113803079605
+        },
+        {
+          "memory_id": "insight-9518fd56020fda633c98a037",
+          "memory_type": "insight",
+          "rank_within_type": 3,
+          "action": "keep",
+          "reason": "default_keep",
+          "utility": 0.003534629059864347,
+          "uncertainty": 0.08503210512744902,
+          "upper_utility_bound": 0.024792655341726602
+        }
+      ]
+    }
+  ]
+}
