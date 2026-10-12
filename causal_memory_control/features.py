@@ -115,8 +115,11 @@ class EventFeatureBuilder:
 class TeamExposureFeatureBuilder:
     """Role-free features for expected team-level exposure utility."""
 
-    def __init__(self, embedder: Optional[TextEmbedder] = None):
+    def __init__(self, embedder: Optional[TextEmbedder] = None, *, version: int = 1):
+        if version not in (1, 2):
+            raise ValueError("unsupported team feature version")
         self.embedder = embedder or HashEmbedder()
+        self.version = version
 
     def build(self, event: TeamMemoryExposureEvent) -> dict[str, float]:
         task = self.embedder.embed(event.query)
@@ -138,6 +141,17 @@ class TeamExposureFeatureBuilder:
             "candidate_redundancy_max": max(peer_similarities, default=0.0),
             f"memory_type::{_safe(event.memory.memory_type)}": 1.0,
         }
+        if self.version == 2:
+            _add_interaction_features(
+                features,
+                query=event.query,
+                state_text=event.task_state,
+                memory_text=event.memory.content,
+                task_vector=task,
+                state_vector=state,
+                memory_vector=memory,
+            )
+            _add_insight_support_features(features, event.memory.metadata)
         _add_optional(features, "reliability_prior", event.reliability_prior)
         retrieval = event.retrieval
         if retrieval is None:
@@ -161,6 +175,19 @@ class TeamExposureFeatureBuilder:
         return features
 
 
+def task_context_metadata(task: Mapping[str, Any]) -> dict[str, Any]:
+    """Share pre-outcome task metadata between diagnostic and runtime events."""
+    excluded = {
+        "task_main", "task_description", "claim", "claim_id", "id", "task_id",
+        "task", "answer", "label", "gold_label", "gold_answer", "few_shots",
+        "supporting_facts", "gold_evidence_page_sets",
+    }
+    return {
+        key: value for key, value in task.items()
+        if key not in excluded and isinstance(value, (str, int, float, bool))
+    }
+
+
 def _add_numeric_mapping(
     features: dict[str, float], prefix: str, values: Mapping[str, Any]
 ) -> None:
@@ -169,6 +196,87 @@ def _add_numeric_mapping(
             features[f"{prefix}::{_safe(key)}"] = float(value)
         elif isinstance(value, (int, float)) and math.isfinite(float(value)):
             features[f"{prefix}::{_safe(key)}"] = float(value)
+
+
+def _add_interaction_features(
+    features: dict[str, float],
+    *,
+    query: str,
+    state_text: str,
+    memory_text: str,
+    task_vector: Sequence[float],
+    state_vector: Sequence[float],
+    memory_vector: Sequence[float],
+    dimensions: int = 64,
+) -> None:
+    """Expose richer query-memory interactions to the lightweight regressor.
+
+    Cosine similarity compresses an entire semantic relation to one scalar.
+    Elementwise products preserve which embedding dimensions agree, while
+    lexical overlap gives a transparent signal for names and answer entities.
+    """
+
+    # Fold every coordinate; never silently discard the final 3/4 of a hash
+    # embedding. These are lexical hash interactions, not pretrained semantics.
+    def fold(vector: Sequence[float]) -> list[float]:
+        values = [0.0] * dimensions
+        for index, value in enumerate(vector):
+            values[index % dimensions] += float(value)
+        return _normalize(values)
+
+    task_vector, state_vector, memory_vector = map(
+        fold, (task_vector, state_vector, memory_vector)
+    )
+    width = dimensions
+    for index in range(width):
+        features[f"memory_text::{index}"] = memory_vector[index]
+        features[f"task_memory_product::{index}"] = float(
+            task_vector[index] * memory_vector[index]
+        )
+        features[f"state_memory_product::{index}"] = float(
+            state_vector[index] * memory_vector[index]
+        )
+    task_tokens = _tokens(query)
+    state_tokens = _tokens(state_text)
+    memory_tokens = _tokens(memory_text)
+    features["lexical_task_memory_jaccard"] = _jaccard(task_tokens, memory_tokens)
+    features["lexical_state_memory_jaccard"] = _jaccard(state_tokens, memory_tokens)
+    features["lexical_task_memory_recall"] = (
+        len(task_tokens & memory_tokens) / len(task_tokens) if task_tokens else 0.0
+    )
+
+
+def _add_insight_support_features(
+    features: dict[str, float], metadata: Mapping[str, Any]
+) -> None:
+    positive = metadata.get("positive_task_count")
+    negative = metadata.get("negative_task_count")
+    for key in ("legacy_score", "positive_task_count", "negative_task_count"):
+        _add_optional(features, f"insight_{key}", metadata.get(key))
+    if not all(isinstance(value, (int, float)) and math.isfinite(value)
+               for value in (positive, negative)):
+        features["insight_maintenance_support_missing"] = 1.0
+        return
+    positive_value = max(float(positive), 0.0)
+    negative_value = max(float(negative), 0.0)
+    total = positive_value + negative_value
+    # This is deliberately named a maintenance signal, not reliability: the
+    # source lists are GMemory rule-maintenance associations, not Bernoulli
+    # correctness observations.
+    features["insight_maintenance_support_missing"] = 0.0
+    features["insight_maintenance_support_total"] = total
+    features["insight_maintenance_positive_fraction"] = (
+        positive_value / total if total else 0.5
+    )
+
+
+def _tokens(text: str) -> set[str]:
+    return set(re.findall(r"\w+", str(text).casefold()))
+
+
+def _jaccard(left: set[str], right: set[str]) -> float:
+    union = left | right
+    return len(left & right) / len(union) if union else 0.0
 
 
 def _add_optional(features: dict[str, float], name: str, value: Any) -> None:

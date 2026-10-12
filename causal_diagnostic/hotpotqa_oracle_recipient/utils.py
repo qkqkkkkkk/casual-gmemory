@@ -11,6 +11,10 @@ from typing import Any
 import numpy as np
 
 from mas.memory.common import MASMessage
+from causal_memory_control.insight_metadata import (
+    enrich_insight_payload,
+    load_insight_catalog,
+)
 
 
 def seed_everything(seed: int) -> None:
@@ -44,7 +48,13 @@ def _message_id(message: MASMessage) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def candidate_metadata(frozen: Any, kind: str, index: int) -> dict[str, Any]:
+def candidate_metadata(
+    frozen: Any,
+    kind: str,
+    index: int,
+    *,
+    memory_dir: Path | None = None,
+) -> dict[str, Any]:
     if kind == "trajectory":
         candidate = frozen.successful[index]
         extra = candidate.extra_fields if isinstance(candidate.extra_fields, dict) else {}
@@ -60,11 +70,15 @@ def candidate_metadata(frozen: Any, kind: str, index: int) -> dict[str, Any]:
         }
     if kind == "insight":
         candidate = frozen.insights[index]
-        return {
+        payload = {
             "kind": kind,
             "index": index,
             "candidate_id": "insight-"
             + hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:16],
             "text": candidate,
         }
+        return enrich_insight_payload(
+            payload,
+            load_insight_catalog(memory_dir) if memory_dir is not None else {},
+        )
     raise ValueError(f"unsupported candidate kind: {kind}")

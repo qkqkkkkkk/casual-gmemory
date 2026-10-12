@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import random
@@ -13,6 +14,14 @@ from typing import Any, Mapping, Sequence
 PHYSICAL_AUDIT_FIELDS = frozenset({"memory_sha256"})
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", type=Path, required=True)
@@ -20,6 +29,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--bootstrap-samples", type=int, default=10000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--require-no-drop-match", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -76,6 +86,8 @@ def compare(
     bootstrap_samples: int = 10000,
     seed: int = 42,
 ) -> dict[str, Any]:
+    if bootstrap_samples < 1:
+        raise ValueError("bootstrap_samples must be positive")
     baseline = _load(baseline_path)
     gate = _load(gate_path)
     baseline_ids, gate_ids = set(baseline), set(gate)
@@ -111,7 +123,25 @@ def compare(
     success_ci = _paired_interval(
         success_delta, samples=bootstrap_samples, seed=seed + 1
     )
-    return {
+    no_drop_mismatches = []
+    retrieval_mismatches = []
+    for task_id in task_ids:
+        b, g = baseline[task_id], gate[task_id]
+        if ("retrieval_fingerprint" in b and "retrieval_fingerprint" in g
+                and b["retrieval_fingerprint"] != g["retrieval_fingerprint"]):
+            retrieval_mismatches.append(task_id)
+        if int(g.get("dropped_count", 0)) != 0:
+            continue
+        fields = []
+        for key in ("reward", "done", "retrieval_fingerprint"):
+            if key in b and key in g and b[key] != g[key]:
+                fields.append(key)
+        b_out, g_out = b.get("outcome", {}), g.get("outcome", {})
+        if "prediction" in b_out and "prediction" in g_out and b_out["prediction"] != g_out["prediction"]:
+            fields.append("prediction")
+        if fields:
+            no_drop_mismatches.append({"task_id": task_id, "different_fields": fields})
+    result = {
         "paired_tasks": len(task_ids),
         "baseline_mean_reward": _mean(base_rewards),
         "gate_mean_reward": _mean(gate_rewards),
@@ -122,7 +152,25 @@ def compare(
         "completion_rate_delta": _mean(success_delta),
         "completion_rate_delta_95ci": list(success_ci),
         "gate_mean_keep_rate": _mean(keep_rates),
+        "tasks_with_drop": sum(int(gate[key].get("dropped_count", 0)) > 0 for key in task_ids),
+        "no_drop_mismatches": no_drop_mismatches,
+        "retrieval_mismatches": retrieval_mismatches,
+        "paired_control_valid": not no_drop_mismatches and not retrieval_mismatches,
+        "baseline_log_sha256": file_sha256(baseline_path),
+        "gate_log_sha256": file_sha256(gate_path),
     }
+    if baseline[task_ids[0]].get("run_metadata", {}).get("benchmark") == "HotpotQA_distractor_offline":
+        result.update(
+            baseline_answer_f1=result["baseline_mean_reward"],
+            gate_answer_f1=result["gate_mean_reward"],
+            answer_f1_delta=result["reward_delta"],
+            answer_f1_delta_95ci=result["reward_delta_95ci"],
+            baseline_answer_em=result["baseline_completion_rate"],
+            gate_answer_em=result["gate_completion_rate"],
+            answer_em_delta=result["completion_rate_delta"],
+            answer_em_delta_95ci=result["completion_rate_delta_95ci"],
+        )
+    return result
 
 
 def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
@@ -138,6 +186,8 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered + "\n", encoding="utf-8")
     print(rendered)
+    if args.require_no_drop_match and not result["paired_control_valid"]:
+        raise SystemExit("no-DROP outcomes or original retrievals differ from baseline; inspect comparison.json")
     return result
 
 

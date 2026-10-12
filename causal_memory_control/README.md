@@ -1,5 +1,12 @@
 # Team-Level Causal Memory Gate
 
+The improved v2 estimator and complete HotpotQA baseline-versus-gate pipeline
+are documented in [HOTPOTQA_GATE_V2.md](HOTPOTQA_GATE_V2.md), including training
+losses, calibration, server commands, ablations, and interruption recovery.
+New `train_gate` invocations default to v2 features, task bootstrap, ridge,
+and a direct-utility head with supervised pairwise ranking. Existing v1
+checkpoints remain readable; retraining is required to use the new features.
+
 This package provides a deployable plug-in experiment for GMemory. It leaves
 memory construction, graph storage, native retrieval, MAS topology, and the
 write policy unchanged. The only intervention point is after

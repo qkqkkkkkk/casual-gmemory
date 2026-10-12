@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace, field
 import hashlib
 import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .estimator import AmortizedUtilityEstimator
-from .features import HashEmbedder, TeamExposureFeatureBuilder
+from .features import HashEmbedder, TeamExposureFeatureBuilder, task_context_metadata
 from .gmemory_adapter import AdaptedGMemoryRetrieval, GMemoryRetrievalAdapter
+from .insight_metadata import load_insight_catalog
+from .jsonl import read_jsonl
 from .types import (
     ExposureAction,
     MemoryCandidate,
@@ -33,6 +35,9 @@ class ExposureDecision:
     upper_utility_bound: float
     reason: str
     prediction: PotentialOutcomePrediction
+    retrieval_rank: int | None = None
+    memory_content: str = ""
+    memory_metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -43,6 +48,9 @@ class ExposureDecision:
             "upper_utility_bound": self.upper_utility_bound,
             "reason": self.reason,
             "prediction": asdict(self.prediction),
+            "retrieval_rank": self.retrieval_rank,
+            "memory_content": self.memory_content,
+            "memory_metadata": dict(self.memory_metadata),
         }
 
 
@@ -71,6 +79,7 @@ class GMemoryExposureGate:
         max_drops: int | None = 1,
         task_metadata: Mapping[str, Any] | None = None,
         checkpoint_metadata: Mapping[str, Any] | None = None,
+        memory_dir: str | Path | None = None,
         log_path: str | Path | None = None,
         resume: bool = False,
     ):
@@ -132,11 +141,18 @@ class GMemoryExposureGate:
                     f"gate log already exists: {self.log_path}; use resume or a fresh path"
                 )
             self.completed_task_ids = self._load_completed_task_ids()
-        self.adapter = GMemoryRetrievalAdapter()
+        self.memory_dir = Path(memory_dir) if memory_dir is not None else None
+        insight_catalog = (
+            load_insight_catalog(self.memory_dir)
+            if self.memory_dir is not None
+            else {}
+        )
+        self.adapter = GMemoryRetrievalAdapter(insight_catalog=insight_catalog)
         self._task_id: Any = None
         self._task_config: Mapping[str, Any] = {}
         self._task_decisions: list[ExposureDecision] = []
         self._retrieved_count = 0
+        self._retrieval_fingerprint = ""
 
     def task_is_complete(self, task_id: Any) -> bool:
         return str(task_id) in self.completed_task_ids
@@ -151,8 +167,14 @@ class GMemoryExposureGate:
         if payload.get("schema") != CHECKPOINT_SCHEMA:
             raise ValueError("unsupported GMemory exposure-gate checkpoint")
         feature_config = payload.get("feature_builder", {})
-        if feature_config.get("type") != "team-exposure-features-v1":
+        feature_type = feature_config.get("type")
+        if feature_type not in ("team-exposure-features-v1", "team-exposure-features-v2"):
             raise ValueError("unsupported exposure feature schema")
+        feature_version = 2 if feature_type.endswith("v2") else 1
+        # Old checkpoints learned from bare strings. Restoring nonzero support
+        # counts for them would silently change their input distribution.
+        if feature_version == 1:
+            kwargs.pop("memory_dir", None)
         dimensions = int(feature_config.get("hash_dimensions", 256))
         estimator = AmortizedUtilityEstimator.from_dict(payload["estimator"])
         checkpoint_metadata = dict(payload.get("training_metadata", {}))
@@ -215,7 +237,7 @@ class GMemoryExposureGate:
             )
         return cls(
             estimator=estimator,
-            feature_builder=TeamExposureFeatureBuilder(HashEmbedder(dimensions)),
+            feature_builder=TeamExposureFeatureBuilder(HashEmbedder(dimensions), version=feature_version),
             checkpoint_metadata=checkpoint_metadata,
             **kwargs,
         )
@@ -230,6 +252,7 @@ class GMemoryExposureGate:
         self._task_config = dict(task_config)
         self._task_decisions = []
         self._retrieved_count = 0
+        self._retrieval_fingerprint = ""
 
     def filter_retrieval(
         self,
@@ -240,6 +263,10 @@ class GMemoryExposureGate:
         **_: Any,
     ) -> tuple[list[Any], list[Any], list[Any]]:
         retrieval = self.adapter.adapt(result)
+        self._retrieval_fingerprint = _digest(query_task, task_state, json.dumps(
+            [(candidate.memory_id, candidate.content) for candidate in retrieval.candidates],
+            ensure_ascii=False,
+        ))
         self._retrieved_count = len(retrieval.candidates)
         provisional: list[ExposureDecision] = []
         for index, candidate in enumerate(retrieval.candidates):
@@ -250,7 +277,12 @@ class GMemoryExposureGate:
                 query_task=query_task,
                 task_state=task_state,
             )
-            provisional.append(self._decide(event))
+            provisional.append(replace(
+                self._decide(event),
+                retrieval_rank=event.retrieval.rank,
+                memory_content=candidate.content,
+                memory_metadata=candidate.metadata,
+            ))
 
         # Limit simultaneous learned interventions because each training label
         # estimates dropping one candidate while holding the remaining set fixed.
@@ -267,14 +299,10 @@ class GMemoryExposureGate:
         decisions = []
         for decision in provisional:
             if decision.action == ExposureAction.DROP and decision.memory_id not in learned_drop_ids:
-                decision = ExposureDecision(
-                    event_id=decision.event_id,
-                    memory_id=decision.memory_id,
-                    memory_type=decision.memory_type,
+                decision = replace(
+                    decision,
                     action=ExposureAction.KEEP,
-                    upper_utility_bound=decision.upper_utility_bound,
                     reason="kept_by_max_drops_budget",
-                    prediction=decision.prediction,
                 )
             decisions.append(decision)
         self._task_decisions.extend(decisions)
@@ -312,6 +340,7 @@ class GMemoryExposureGate:
             "max_drops": self.max_drops,
             "exposure_count": len(self.exposure_agent_ids),
             "retrieved_count": self._retrieved_count,
+            "retrieval_fingerprint": self._retrieval_fingerprint,
             "kept_count": kept,
             "dropped_count": len(self._task_decisions) - kept,
             "keep_rate": kept / len(self._task_decisions) if self._task_decisions else 1.0,
@@ -418,12 +447,18 @@ class GMemoryExposureGate:
             "problem_index",
             "claim_id",
             "claim",
+            "hotpot_id",
+            "question",
             "id",
             "task",
         )
         return {key: self._task_config[key] for key in keys if key in self._task_config}
 
     def _event_task_metadata(self) -> dict[str, Any]:
+        if self.feature_builder.version == 2:
+            # Experiment seeds and snapshot settings are audit metadata, not
+            # task state. Diagnostic examples do not contain those fields.
+            return task_context_metadata(self._task_config)
         metadata = dict(self.task_metadata)
         excluded = {
             "answer",
@@ -449,12 +484,7 @@ class GMemoryExposureGate:
 
     def _load_completed_task_ids(self) -> set[str]:
         completed: set[str] = set()
-        for line_number, line in enumerate(
-            self.log_path.read_text(encoding="utf-8").splitlines(), 1
-        ):
-            if not line.strip():
-                continue
-            row = json.loads(line)
+        for line_number, row in enumerate(read_jsonl(self.log_path, repair_tail=True), 1):
             if row.get("schema") != RUNTIME_LOG_SCHEMA:
                 raise ValueError(
                     f"unexpected gate-log schema at line {line_number}: {row.get('schema')}"
@@ -481,12 +511,13 @@ def save_gate_checkpoint(
     estimator: AmortizedUtilityEstimator,
     *,
     hash_dimensions: int = 256,
+    feature_version: int = 1,
     training_metadata: Mapping[str, Any] | None = None,
 ) -> None:
     payload = {
         "schema": CHECKPOINT_SCHEMA,
         "feature_builder": {
-            "type": "team-exposure-features-v1",
+            "type": f"team-exposure-features-v{feature_version}",
             "hash_dimensions": int(hash_dimensions),
         },
         "estimator": estimator.to_dict(),

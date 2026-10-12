@@ -38,6 +38,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from causal_memory_control.jsonl import read_jsonl
 from causal_diagnostic.fever_oracle_recipient.data import (
     file_md5,
     load_binary_fever,
@@ -451,12 +452,7 @@ def _prepare_output(
         rows_path.touch(exist_ok=False)
 
     existing: dict[tuple[int, str, int, str], dict[str, Any]] = {}
-    for line_number, line in enumerate(
-        rows_path.read_text(encoding="utf-8").splitlines(), 1
-    ):
-        if not line.strip():
-            continue
-        row = json.loads(line)
+    for line_number, row in enumerate(read_jsonl(rows_path, repair_tail=args.resume), 1):
         key = (
             int(row["task_id"]),
             str(row["candidate"]["candidate_id"]),
@@ -825,11 +821,21 @@ def main(argv: Sequence[str] | None = None) -> Path:
             "failed_trajectories": len(frozen.failed),
             "insights": len(frozen.insights),
         }
+        logged_candidate_set = []
+        for kind, values in (("trajectory", frozen.successful), ("insight", frozen.insights)):
+            for index in range(len(values)):
+                payload = candidate_metadata(frozen, kind, index, memory_dir=args.memory_dir)
+                if args.all_candidates:
+                    payload["candidate_id"] += f"-rank{index + 1}"
+                logged_candidate_set.append(payload)
 
         for candidate_kind, candidate_index in candidate_specs:
             try:
                 candidate = candidate_metadata(
-                    frozen, candidate_kind, candidate_index
+                    frozen,
+                    candidate_kind,
+                    candidate_index,
+                    memory_dir=args.memory_dir,
                 )
                 if args.all_candidates:
                     candidate = {
@@ -943,6 +949,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
                             ),
                         },
                         "candidate": candidate,
+                        "candidate_set": logged_candidate_set,
                         "retrieval_sizes": retrieval_sizes,
                         "exposure_count": len(all_recipients) + 1,
                         "repeat_index": repeat_index,

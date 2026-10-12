@@ -40,6 +40,7 @@ from causal_memory_control.runtime_gate import (
     CHECKPOINT_SCHEMA,
     GMemoryExposureGate,
 )
+from causal_memory_control.jsonl import read_jsonl
 
 
 RUNNER_SCHEMA = "gmemory-team-exposure-fever-evaluation-v1"
@@ -515,6 +516,8 @@ def main(argv: Sequence[str] | None = None) -> Path:
     _prepare_output(args, design=design, run=run)
 
     log_path = args.output_dir / "memory_gate.jsonl"
+    if args.resume:
+        read_jsonl(log_path, repair_tail=True)
     cache_path = args.output_dir / "llm_cache.sqlite"
     if cache_seed is not None and not cache_path.exists():
         shutil.copy2(cache_seed, cache_path)
@@ -539,6 +542,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
         "candidate_kinds": args.candidate_kinds,
         "max_drops": None if args.max_drops == -1 else args.max_drops,
         "task_metadata": design,
+        "memory_dir": args.memory_dir,
         "log_path": log_path,
         "resume": args.resume,
     }

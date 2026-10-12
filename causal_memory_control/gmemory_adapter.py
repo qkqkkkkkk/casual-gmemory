@@ -39,6 +39,16 @@ class GMemoryPromptInputs:
 class GMemoryRetrievalAdapter:
     """Normalize ``GMemory.retrieve_memory()`` without importing G-Memory."""
 
+    def __init__(
+        self,
+        *,
+        insight_catalog: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    ) -> None:
+        self.insight_catalog = {
+            str(rule): dict(metadata)
+            for rule, metadata in (insight_catalog or {}).items()
+        }
+
     def adapt(self, result: tuple[Sequence[Any], Sequence[Any], Sequence[Any]]) -> AdaptedGMemoryRetrieval:
         successful, failed, insights = result
         candidates = []
@@ -185,10 +195,10 @@ class GMemoryRetrievalAdapter:
             },
         )
 
-    @staticmethod
-    def _insight(insight: Any, index: int) -> MemoryCandidate:
+    def _insight(self, insight: Any, index: int) -> MemoryCandidate:
         text = _insight_text(insight)
-        data = insight if isinstance(insight, Mapping) else {}
+        data = dict(insight) if isinstance(insight, Mapping) else {}
+        restored = self.insight_catalog.get(text, {})
         raw_id = data.get("memory_id")
         memory_id = str(raw_id) if raw_id else "insight-" + _digest(text)[:24]
         return MemoryCandidate(
@@ -197,9 +207,17 @@ class GMemoryRetrievalAdapter:
             content=text,
             metadata={
                 "retrieval_index": index,
-                "legacy_score": data.get("score"),
-                "positive_task_count": len(data.get("positive_correlation_tasks", ()) or ()),
-                "negative_task_count": len(data.get("negative_correlation_tasks", ()) or ()),
+                "legacy_score": data.get("score", restored.get("legacy_score")),
+                "positive_task_count": (
+                    len(data.get("positive_correlation_tasks", ()) or ())
+                    if "positive_correlation_tasks" in data
+                    else restored.get("positive_task_count")
+                ),
+                "negative_task_count": (
+                    len(data.get("negative_correlation_tasks", ()) or ())
+                    if "negative_correlation_tasks" in data
+                    else restored.get("negative_task_count")
+                ),
                 "memory_schema_version": data.get("memory_schema_version", "gmemory-v1"),
             },
         )
@@ -232,4 +250,3 @@ def _digest(*parts: Any) -> str:
     return hashlib.sha256(
         "\x1f".join(str(part) for part in parts).encode("utf-8")
     ).hexdigest()
-
