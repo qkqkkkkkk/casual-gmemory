@@ -41,9 +41,12 @@ from causal_memory_control.runtime_gate import (
     GMemoryExposureGate,
 )
 from causal_memory_control.jsonl import read_jsonl
+from causal_memory_control.task_state import (
+    TASK_STATE_POLICY, reset_task_execution_state, validate_task_state_policy,
+)
 
 
-RUNNER_SCHEMA = "gmemory-team-exposure-fever-evaluation-v1"
+RUNNER_SCHEMA = "gmemory-team-exposure-fever-evaluation-v2"
 PHYSICAL_MEMORY_CONTEXT_FIELDS = frozenset({"memory_sha256"})
 
 # Loaded only for an actual run. Keeping the validation/data helpers light makes
@@ -355,6 +358,7 @@ def _align_resume_design(
     if not manifest_path.is_file():
         return dict(design)
     previous_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    validate_task_state_policy(previous_manifest, args.output_dir)
     try:
         return reconcile_retest_design(design, previous_manifest)
     except SnapshotProvenanceError as exc:
@@ -455,6 +459,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
     )
     design = {
         "runner_schema": RUNNER_SCHEMA,
+        "task_state_policy": TASK_STATE_POLICY,
         "benchmark": "FEVER_binary_offline",
         "source_md5": source_md5,
         "snapshot_design_hash": snapshot["design_hash"],
@@ -644,6 +649,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
             current_claim_id = claim_id
             task = prepare_example(raw_example)
             env.set_env(task)
+            reset_task_execution_state(mas)
             seed_everything((args.seed + claim_id) % (2**32))
             gate.begin_task(claim_id, task)
             before = memory.memory_size

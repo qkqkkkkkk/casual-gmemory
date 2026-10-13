@@ -36,9 +36,12 @@ from causal_diagnostic.hotpotqa_oracle_recipient.sampling import (
 )
 from causal_memory_control.runtime_gate import CHECKPOINT_SCHEMA, GMemoryExposureGate
 from causal_memory_control.jsonl import read_jsonl
+from causal_memory_control.task_state import (
+    TASK_STATE_POLICY, reset_task_execution_state, validate_task_state_policy,
+)
 
 
-RUNNER_SCHEMA = "gmemory-team-exposure-hotpotqa-evaluation-v1"
+RUNNER_SCHEMA = "gmemory-team-exposure-hotpotqa-evaluation-v2"
 PHYSICAL_MEMORY_CONTEXT_FIELDS = frozenset({"memory_sha256"})
 
 SeededCachedChat = None
@@ -328,6 +331,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
     memory_hash = _directory_hash(args.memory_dir)
     design = {
         "runner_schema": RUNNER_SCHEMA,
+        "task_state_policy": TASK_STATE_POLICY,
         "benchmark": "HotpotQA_distractor_offline",
         "source_md5": source_md5,
         "snapshot_design_hash": snapshot["design_hash"],
@@ -349,6 +353,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
     }
     if args.resume and (args.output_dir / "run_manifest.json").is_file():
         previous = json.loads((args.output_dir / "run_manifest.json").read_text(encoding="utf-8"))
+        validate_task_state_policy(previous, args.output_dir)
         try:
             design = reconcile_retest_design(design, previous)
         except SnapshotProvenanceError as exc:
@@ -492,6 +497,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
             current_id = int(raw["id"])
             task = prepare_example(raw)
             env.set_env(task)
+            reset_task_execution_state(mas)
             seed_everything((args.seed + current_id) % (2**32))
             gate.begin_task(current_id, task)
             before = memory.memory_size

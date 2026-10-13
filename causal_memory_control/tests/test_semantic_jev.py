@@ -484,6 +484,35 @@ class MatrixTests(unittest.TestCase):
             self.assertEqual(len(commands),11)
             jev_service.assert_not_called()
 
+            # Updating an interrupted v1 experiment must rerun its evaluations,
+            # retain fitted checkpoints, and resume normally thereafter.
+            saved_checkpoints = {arm:(result.parent/"checkpoints"/f"{arm}.json").read_bytes()
+                                 for arm in matrix.DEFAULT_ARMS}
+            old_log = (result.parent/"semantic_linear/memory_gate.jsonl").read_bytes()
+            for method in ("native_gmemory", "semantic_linear"):
+                path = result.parent/method/"run_manifest.json"
+                manifest = json.loads(path.read_text())
+                manifest["runner_schema"] = "gmemory-team-exposure-hotpotqa-evaluation-v1"
+                manifest["design"]["runner_schema"] = manifest["runner_schema"]
+                manifest["design"].pop("task_state_policy")
+                path.write_text(json.dumps(manifest))
+            before = len(commands)
+            matrix.main(argv)
+            repair_stages = commands[before:]
+            self.assertIn("native_gmemory", repair_stages)
+            self.assertIn("semantic_linear:evaluate", repair_stages)
+            self.assertNotIn("diagnostic", repair_stages)
+            self.assertFalse(any(stage.endswith(":train") for stage in repair_stages))
+            for arm, payload in saved_checkpoints.items():
+                self.assertEqual((result.parent/"checkpoints"/f"{arm}.json").read_bytes(), payload)
+                self.assertTrue(json.loads((result.parent/arm/"comparison.json").read_text())["paired_control_valid"])
+            backups = list((result.parent/"evaluation_backups").iterdir())
+            self.assertEqual(len(backups), 1)
+            self.assertEqual((backups[0]/"semantic_linear/memory_gate.jsonl").read_bytes(), old_log)
+            before = len(commands)
+            matrix.main(argv)
+            self.assertEqual(len(commands), before)
+
     def test_matrix_builds_true_mlp_command_and_common_baseline_cache(self):
         options,args = matrix.parse_args(["--matrix-dir","/tmp/test-gate-matrix"])
         args.training_claims,args.final_claims = 400,100

@@ -87,6 +87,8 @@ class _HotpotMacNet(_FakeMacNet):
         if task["id"] == type(self).fail_id:
             raise RuntimeError("simulated model timeout")
         type(self).schedule_count += 1
+        nodes = (*self._agent_nodes.values(), self._decision_node)
+        assert all(not node.history for node in nodes), "previous task state leaked"
         self.env.reset()
         self.memory.gate.filter_retrieval(
             ([_FakeMessage()], [], ["Read both supporting paragraphs."]),
@@ -95,6 +97,8 @@ class _HotpotMacNet(_FakeMacNet):
         # Partial credit is distinct from a completed episode and exact match.
         self.env.step("Finish[New York]")
         reward, done, _ = self.env.feedback()
+        for node in nodes:
+            node.history.append(task["id"])
         return reward, done
 
 

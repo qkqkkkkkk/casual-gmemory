@@ -24,6 +24,7 @@ from causal_diagnostic.fever_oracle_recipient.data import (
     BINARY_LABELS,
     load_binary_fever,
 )
+from causal_memory_control.task_state import archive_legacy_evaluations
 
 
 PIPELINE_SCHEMA = "gmemory-fever-gate-comparison-pipeline-v3"
@@ -1066,6 +1067,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
     if args.plan_only:
         return args.output_dir / "pipeline_manifest.json"
     _prepare_manifest(args)
+    archive_legacy_evaluations(args.output_dir, ("native_gmemory", "learned_gate"))
 
     progress_path = args.output_dir / "pipeline_progress.json"
     state = _load_json(progress_path) or {

@@ -18,6 +18,7 @@ from . import run_hotpotqa_gate_comparison as base
 from . import hotpotqa_experiment as evaluation
 from .compare_gate_runs import file_sha256
 from .dataset_adapters import HotpotQADatasetAdapter
+from .task_state import archive_legacy_evaluations
 
 
 ARMS = ("linear", "semantic_linear", "semantic_mlp", "jev_direct", "jev_decomposed")
@@ -262,6 +263,7 @@ def main(argv=None, *, adapter=None):
         if root.exists() and any(root.iterdir()):
             raise SystemExit("non-empty matrix directory has no manifest")
         base._write_json(manifest,{"configuration_hash":identity,"configuration":configuration})
+    archive_legacy_evaluations(root, ("native_gmemory", *matrix.arms))
     state = {"status":"running","stages":{},"error":None}
     current_stage,current_command,current_log = "initialization",[],None
 

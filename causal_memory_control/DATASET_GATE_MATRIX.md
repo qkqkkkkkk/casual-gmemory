@@ -111,6 +111,29 @@ Gate 方法，可在新矩阵中复用配置一致的 memory/diagnostic，并用
 
 ## 进度、恢复与结果
 
+评测在每道新题开始前清空所有 worker 和 decision node 的执行历史，保留
+同一道题内部的空间/时间连接。`run_manifest.json` 和逐题 `run_metadata` 记录
+`task_state_policy=isolated-task-state-v1`，FEVER/HotpotQA evaluator schema 均为 v2。
+这消除了前一题 DROP 通过 Chain 的 temporal history 影响后一题的问题，也让
+断点恢复不再依赖已完成题目的节点历史。
+
+更新到该修复版本后，使用原来的完整命令和原矩阵目录即可。程序会把 v1
+最终评测目录、缓存和旧报告移动到
+`<matrix-dir>/evaluation_backups/before-task-isolation-*/`，再运行最终评测。
+若旧 baseline 需要重做，各 Gate 的最终评测一起重做；冻结 memory、反事实
+采集结果、语义 embedding 缓存和已拟合 checkpoint 保留并校验复用。
+旧产物可从备份恢复，但不作为新的配对结果。单独调用 evaluator 的 `--resume`
+会拒绝 v1 结果；此时运行比较入口，或选择新的 evaluator 输出目录。
+
+例如此前使用 11434 的 HotpotQA 实验，仍在原终端中保留数组时运行：
+
+```bash
+python -u -m causal_memory_control.run_gate_matrix \
+  "${hotpot_gate_args[@]}" \
+  --endpoint http://127.0.0.1:11434/v1 \
+  --matrix-dir causal_memory_control/results/hotpotqa_semantic_only_v3_api11434
+```
+
 中断后重新执行原命令即可：完成阶段校验后跳过；反事实采集按分支恢复，
 评测按问题恢复，成功请求使用缓存。MLP 拟合中断只会重新执行该拟合阶段。
 进度条显示阶段和子任务进度；详细异常在 `matrix_progress.json` 与 `logs/*.log`。
@@ -165,6 +188,25 @@ answer F1/EM 字段。新任务可把所需标量得分定义为 reward，复用
 用于锁定任务语义，改变 loader/env/scorer 时应更新版本并使用新产物目录。
 
 ## 上传代码
+
+跨题状态隔离修复的增量提交：
+
+```bash
+git add causal_memory_control/task_state.py \
+  causal_memory_control/hotpotqa_experiment.py \
+  causal_memory_control/fever_experiment.py \
+  causal_memory_control/run_hotpotqa_gate_matrix.py \
+  causal_memory_control/run_hotpotqa_gate_comparison.py \
+  causal_memory_control/run_fever_gate_comparison.py \
+  causal_memory_control/tests/test_task_state.py \
+  causal_memory_control/tests/test_hotpotqa_gate.py \
+  causal_memory_control/tests/test_fever_experiment.py \
+  causal_memory_control/tests/test_semantic_jev.py \
+  causal_memory_control/DATASET_GATE_MATRIX.md \
+  causal_memory_control/README.md
+git commit -m "Isolate task state and recover legacy gate evaluations"
+git push origin main
+```
 
 包含本轮统一封装和此前语义 MLP/Jev 的改动。仅提交这些代码、测试和说明：
 

@@ -111,6 +111,10 @@ class _FakeNode:
         self.id = node_id
         self.reasoning_config = SimpleNamespace(temperature=0.0)
         self._agent = _FakeAgent()
+        self.history = []
+
+    def clear_state(self) -> None:
+        self.history.clear()
 
 
 class _FakeClient:
@@ -150,6 +154,8 @@ class _FakeMacNet:
 
     def schedule(self, task) -> tuple[float, bool]:
         type(self).schedule_count += 1
+        nodes = (*self._agent_nodes.values(), self._decision_node)
+        assert all(not node.history for node in nodes), "previous task state leaked"
         self.env.reset()
         self.memory.gate.filter_retrieval(
             ([_FakeMessage()], [], []),
@@ -158,6 +164,8 @@ class _FakeMacNet:
         )
         self.env.step(f"Finish[{task['label']}]")
         reward, done, _ = self.env.feedback()
+        for node in nodes:
+            node.history.append(task["id"])
         return reward, done
 
 

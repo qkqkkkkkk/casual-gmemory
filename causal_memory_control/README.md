@@ -6,6 +6,12 @@ or `--dataset fever`.
 Dataset selection, server commands, resumable runs and extension adapters are
 documented in [DATASET_GATE_MATRIX.md](DATASET_GATE_MATRIX.md).
 
+FEVER and HotpotQA evaluations clear worker and decision-node buffers before
+each independent task, preserving collaboration within that task. Comparison
+runners archive pre-isolation v1 evaluations under `evaluation_backups/` and
+rerun final evaluations while retaining frozen memory, diagnostic data and
+fitted checkpoints. The original command also resumes the new evaluations.
+
 The default comparison runs native GMemory plus hash linear, semantic linear
 and semantic MLP gates. Jev is disabled by default; its two arms remain available
 through explicit `--arms` selection. These methods are documented in

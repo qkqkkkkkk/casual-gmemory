@@ -25,6 +25,7 @@ from causal_diagnostic.hotpotqa_oracle_recipient.provenance import stable_hash
 from causal_memory_control.jsonl import read_jsonl
 from causal_memory_control import hotpotqa_experiment as evaluation
 from causal_memory_control.compare_gate_runs import file_sha256
+from causal_memory_control.task_state import TASK_STATE_POLICY, archive_legacy_evaluations
 
 
 PIPELINE_SCHEMA = "gmemory-hotpotqa-gate-comparison-pipeline-v1"
@@ -460,6 +461,7 @@ def _validated_evaluation_complete(
     expected_ids = snapshot["evaluation_ids"][args.training_claims:args.evaluation_count]
     _require_fields("completed evaluation", design, {
         "runner_schema": runner.RUNNER_SCHEMA,
+        "task_state_policy": TASK_STATE_POLICY,
         "benchmark": benchmark,
         "source_md5": snapshot["source_md5"],
         "snapshot_design_hash": snapshot["design_hash"],
@@ -734,6 +736,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
     if args.plan_only:
         return args.output_dir / "pipeline_manifest.json"
     _prepare_manifest(args)
+    archive_legacy_evaluations(args.output_dir, ("native_gmemory", "learned_gate"))
 
     progress_path = args.output_dir / "pipeline_progress.json"
     state = _load_json(progress_path) or {
