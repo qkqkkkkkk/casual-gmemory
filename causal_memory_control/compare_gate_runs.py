@@ -30,6 +30,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--require-no-drop-match", action="store_true")
+    parser.add_argument("--require-policy-success",action="store_true")
     return parser.parse_args(argv)
 
 
@@ -158,7 +159,13 @@ def compare(
         "paired_control_valid": not no_drop_mismatches and not retrieval_mismatches,
         "baseline_log_sha256": file_sha256(baseline_path),
         "gate_log_sha256": file_sha256(gate_path),
+        "drop_improved_tasks":sum(gate[key]["reward"]>baseline[key]["reward"] and gate[key].get("dropped_count",0)>0 for key in task_ids),
+        "drop_harmed_tasks":sum(gate[key]["reward"]<baseline[key]["reward"] and gate[key].get("dropped_count",0)>0 for key in task_ids),
+        **{metric:sum(float(gate[key].get("outcome",{}).get(metric,0)) for key in task_ids) for metric in (
+            "jev_errors","jev_calls","jev_cache_hits","jev_latency_seconds","jev_input_tokens","jev_output_tokens","jev_reported_cost"
+        )},
     }
+    result["policy_valid"] = result["jev_errors"]==0
     if baseline[task_ids[0]].get("run_metadata", {}).get("benchmark") == "HotpotQA_distractor_offline":
         result.update(
             baseline_answer_f1=result["baseline_mean_reward"],
@@ -188,6 +195,8 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
     print(rendered)
     if args.require_no_drop_match and not result["paired_control_valid"]:
         raise SystemExit("no-DROP outcomes or original retrievals differ from baseline; inspect comparison.json")
+    if args.require_policy_success and not result["policy_valid"]:
+        raise SystemExit("Jev API errors occurred; decisions defaulted to KEEP. Fix service settings and retry error tasks.")
     return result
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
 import time
 from typing import Any
 
@@ -40,3 +41,18 @@ def read_jsonl(path: Path, *, repair_tail: bool = False) -> list[dict[str, Any]]
         with path.open("ab") as handle:
             handle.write(b"\n")
     return rows
+
+
+def retry_jev_error_tasks(path: Path) -> None:
+    """Keep completed successful tasks and back up rows needing Jev retry."""
+    rows = read_jsonl(path)
+    retained = [row for row in rows if not row.get("outcome", {}).get("jev_errors")]
+    if len(retained) == len(rows):
+        return
+    backup = path.with_name(f"{path.name}.before-jev-retry-{time.time_ns()}")
+    shutil.copy2(path, backup)
+    temporary = path.with_suffix(".jsonl.tmp")
+    temporary.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in retained),
+                         encoding="utf-8")
+    temporary.replace(path)
+    print(f"Retrying {len(rows) - len(retained)} Jev-error tasks; previous rows saved in {backup}")

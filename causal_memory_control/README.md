@@ -1,5 +1,17 @@
 # Team-Level Causal Memory Gate
 
+The shared FEVER/HotpotQA comparison entry point is
+`python -m causal_memory_control.run_gate_matrix` with `--dataset hotpotqa`
+or `--dataset fever`.
+Dataset selection, server commands, resumable runs and extension adapters are
+documented in [DATASET_GATE_MATRIX.md](DATASET_GATE_MATRIX.md).
+
+The default comparison runs native GMemory plus hash linear, semantic linear
+and semantic MLP gates. Jev is disabled by default; its two arms remain available
+through explicit `--arms` selection. These methods are documented in
+[HOTPOTQA_SEMANTIC_JEV.md](HOTPOTQA_SEMANTIC_JEV.md). It includes server commands,
+independent threshold calibration, API caching, and selective error recovery.
+
 The improved v2 estimator and complete HotpotQA baseline-versus-gate pipeline
 are documented in [HOTPOTQA_GATE_V2.md](HOTPOTQA_GATE_V2.md), including training
 losses, calibration, server commands, ablations, and interruption recovery.

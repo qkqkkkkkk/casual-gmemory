@@ -128,7 +128,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=("always_keep", "always_drop", "learned"),
+        choices=("always_keep", "always_drop", "learned", "jev_direct", "jev_decomposed"),
         default="always_keep",
     )
     parser.add_argument("--checkpoint", type=Path, default=None)
@@ -168,10 +168,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Optional prior run's SQLite cache for matched prompt responses",
     )
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--semantic-cache",type=Path,default=None)
+    parser.add_argument("--jev-cache",type=Path,default=None)
+    parser.add_argument("--retry-jev-errors", action="store_true")
     return parser.parse_args(argv)
 
 
 def _validate_args(args: argparse.Namespace) -> None:
+    if args.retry_jev_errors and (not args.resume or not args.mode.startswith("jev_")):
+        raise SystemExit("--retry-jev-errors requires --resume and a Jev mode")
     if args.claims < 1:
         raise SystemExit("--claims must be at least 1")
     if args.evaluation_offset < 0:
@@ -188,9 +193,9 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--delta and --kappa must be non-negative")
     if args.max_drops < -1:
         raise SystemExit("--max-drops must be non-negative or -1")
-    if args.mode == "learned":
+    if args.mode in ("learned", "jev_direct", "jev_decomposed"):
         if args.checkpoint is None:
-            raise SystemExit("--mode learned requires --checkpoint")
+            raise SystemExit(f"--mode {args.mode} requires --checkpoint")
         if not args.checkpoint.is_file():
             raise SystemExit(f"checkpoint does not exist: {args.checkpoint}")
     elif args.checkpoint is not None:
@@ -414,6 +419,9 @@ def _summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "dropped_candidates": sum(int(row.get("dropped_count", 0)) for row in rows),
         "llm_calls": sum(int(row.get("outcome", {}).get("llm_calls", 0)) for row in rows),
         "cache_hits": sum(int(row.get("outcome", {}).get("cache_hits", 0)) for row in rows),
+        **{key:sum(float(row.get("outcome",{}).get(key,0)) for row in rows) for key in (
+            "jev_calls","jev_cache_hits","jev_latency_seconds","jev_input_tokens","jev_output_tokens","jev_reported_cost","jev_errors"
+        )},
     }
 
 
@@ -518,6 +526,10 @@ def main(argv: Sequence[str] | None = None) -> Path:
     log_path = args.output_dir / "memory_gate.jsonl"
     if args.resume:
         read_jsonl(log_path, repair_tail=True)
+    if args.retry_jev_errors:
+        from .jsonl import retry_jev_error_tasks
+
+        retry_jev_error_tasks(log_path)
     cache_path = args.output_dir / "llm_cache.sqlite"
     if cache_seed is not None and not cache_path.exists():
         shutil.copy2(cache_seed, cache_path)
@@ -547,8 +559,10 @@ def main(argv: Sequence[str] | None = None) -> Path:
         "resume": args.resume,
     }
     gate = (
-        GMemoryExposureGate.from_checkpoint(args.checkpoint, **gate_kwargs)
-        if args.mode == "learned"
+        GMemoryExposureGate.from_checkpoint(args.checkpoint, **gate_kwargs,
+            semantic_cache_path=args.semantic_cache or args.output_dir/"semantic_cache.sqlite",
+            jev_cache_path=args.jev_cache or args.output_dir/"jev_cache.sqlite")
+        if args.mode in ("learned", "jev_direct", "jev_decomposed")
         else GMemoryExposureGate(**gate_kwargs)
     )
     unknown_completed = gate.completed_task_ids - {str(value) for value in selected_ids}
@@ -690,6 +704,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
     finally:
         if client is not None:
             client.close()
+        gate.close()
 
     rows = _load_rows(log_path)
     completed_ids = {str(row["task_id"]) for row in rows}

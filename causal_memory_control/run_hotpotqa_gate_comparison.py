@@ -48,8 +48,11 @@ class StageFailure(RuntimeError):
         super().__init__(f"stage {stage} failed with exit code {returncode}")
 
 
-def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+def parse_args(
+    argv: Sequence[str] | None = None, *, description: str | None = None,
+    defaults: Mapping[str, Any] | None = None,
+) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=description or __doc__)
     parser.add_argument(
         "--data",
         type=Path,
@@ -115,6 +118,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--insights-topk", type=int, default=3)
     parser.add_argument("--threshold", type=float, default=0.0)
     parser.add_argument("--embedding-model", default="sentence-transformers/all-MiniLM-L6-v2")
+    parser.add_argument("--estimator", choices=("linear", "mlp"), default="linear")
+    parser.add_argument("--feature-version", type=int, choices=(2,3), default=2)
+    parser.add_argument("--semantic-model", default="sentence-transformers/all-MiniLM-L6-v2")
+    parser.add_argument("--semantic-revision", default=None)
+    parser.add_argument("--semantic-cache", type=Path, default=None)
+    parser.add_argument("--semantic-chunk-tokens", type=int, default=192)
+    parser.add_argument("--mlp-hidden-sizes", default="128,64")
+    parser.add_argument("--mlp-epochs", type=int, default=80)
+    parser.add_argument("--mlp-learning-rate", type=float, default=0.001)
+    parser.add_argument("--mlp-batch-tasks", type=int, default=16)
+    parser.add_argument("--mlp-device", default="cpu")
+    parser.add_argument("--baseline-cache-seed-from", type=Path, default=None)
     parser.add_argument("--kappa", default="auto", help="auto or a non-negative number")
     parser.add_argument("--delta", type=float, default=0.0)
     parser.add_argument("--max-drops", type=int, default=1)
@@ -126,8 +141,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--contrastive-epochs", type=int, default=20)
     parser.add_argument("--calibration-fraction", type=float, default=0.2)
     parser.add_argument("--kappa-grid", default="0,0.1,0.25,0.5,1.0,1.96")
+    parser.add_argument("--max-changed-harm-rate", type=float, default=1.0)
     parser.add_argument("--bootstrap-samples", type=int, default=10_000)
     parser.add_argument("--plan-only", action="store_true")
+    parser.set_defaults(**dict(defaults or {}))
     return parser.parse_args(argv)
 
 
@@ -181,6 +198,18 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("contrastive epochs must be non-negative; bootstrap samples must be >= 100")
     if args.failed_topk != 0:
         raise SystemExit("MacNet does not expose failed trajectories; use --failed-topk 0")
+    if args.estimator == "mlp" and args.feature_version != 3:
+        raise SystemExit("--estimator mlp requires --feature-version 3")
+    try:
+        widths = [int(value) for value in args.mlp_hidden_sizes.split(",")]
+    except ValueError as exc:
+        raise SystemExit("--mlp-hidden-sizes must be comma-separated positive integers") from exc
+    if (not widths or min(widths) < 1 or args.mlp_epochs < 1
+            or args.mlp_batch_tasks < 1 or args.semantic_chunk_tokens < 8
+            or not math.isfinite(args.mlp_learning_rate) or args.mlp_learning_rate <= 0):
+        raise SystemExit("invalid semantic encoder or MLP optimization settings")
+    if not 0 <= args.max_changed_harm_rate <= 1:
+        raise SystemExit("--max-changed-harm-rate must be in [0,1]")
     if set(range(args.sample_seed_base, args.sample_seed_base + args.repeats)) & set(
         range(args.retest_seed_base, args.retest_seed_base + args.repeats)
     ):
@@ -245,6 +274,16 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
 
 def _configuration(args: argparse.Namespace) -> dict[str, Any]:
     ignored = {"api_key"}
+    # Preserve the identity of v2 runs started before optional semantic arms
+    # existed. They must still resume after updating the code.
+    if args.estimator == "linear" and args.feature_version == 2:
+        ignored.update({"estimator", "feature_version", "semantic_model", "semantic_revision", "semantic_cache",
+                        "semantic_chunk_tokens", "mlp_hidden_sizes", "mlp_epochs", "mlp_learning_rate",
+                        "mlp_batch_tasks", "mlp_device"})
+    if args.baseline_cache_seed_from is None:
+        ignored.add("baseline_cache_seed_from")
+    if args.max_changed_harm_rate == 1.0:
+        ignored.add("max_changed_harm_rate")
     return {
         key: str(value) if isinstance(value, Path) else value
         for key, value in vars(args).items()
@@ -318,7 +357,10 @@ def _require_fields(name: str, actual: Mapping[str, Any], expected: Mapping[str,
         raise RuntimeError(f"{name} is incompatible: {mismatches}; choose new artifact paths")
 
 
-def _checkpoint_complete(args: argparse.Namespace) -> bool:
+def _checkpoint_complete(
+    args: argparse.Namespace, *, benchmark: str = "HotpotQA_distractor_offline",
+    metric: str = "team_score",
+) -> bool:
     payload = _load_json(args.checkpoint)
     if not args.checkpoint.exists():
         return False
@@ -332,34 +374,52 @@ def _checkpoint_complete(args: argparse.Namespace) -> bool:
         and metadata.get("candidate_kind_ranks")
         and metadata.get("policy_calibration", {}).get("enabled")
         and contexts
-        and all(context.get("benchmark") == "HotpotQA_distractor_offline" for context in contexts)
+        and all(context.get("benchmark") == benchmark for context in contexts)
     )
     if not complete:
         raise RuntimeError(f"incomplete or incompatible existing checkpoint: {args.checkpoint}; use a new path")
     _require_fields("checkpoint features", payload.get("feature_builder", {}), {
-        "type": "team-exposure-features-v2", "hash_dimensions": 256,
+        "type": f"team-exposure-features-v{args.feature_version}", "hash_dimensions": 256,
     })
+    if args.feature_version == 3:
+        _require_fields("semantic encoder", payload["feature_builder"]["encoder"], {
+            "type":"sentence-transformer-chunk-mean-v1", "model":args.semantic_model,
+            "revision":args.semantic_revision,"chunk_tokens":args.semantic_chunk_tokens,
+        })
     snapshot = _load_json(args.memory_dir / "causal_snapshot_manifest.json")
     if snapshot is None:
         raise RuntimeError("checkpoint exists without its snapshot")
     sources = [str(args.diagnostic_results / f"seed{seed}{suffix}" / "branches.jsonl")
                for seed, suffix in ((args.sample_seed_base, ""), (args.retest_seed_base, "_retest"))]
     _require_fields("checkpoint metadata", metadata, {
-        "metric": "team_score", "training_sources": sources,
+        "metric": metric, "training_sources": sources,
         "training_source_sha256": {source: file_sha256(Path(source)) for source in sources},
         "training_task_ids": sorted(snapshot["evaluation_ids"][:args.training_claims]),
         "calibration_fraction": args.calibration_fraction,
         "kappa_grid": sorted({float(v) for v in args.kappa_grid.split(",")}),
     })
-    _require_fields("checkpoint estimator", payload["estimator"]["config"], {
+    estimator_fields = {
         key: getattr(args, key) for key in (
             "direct_utility_weight", "contrastive_weight", "contrastive_margin",
-            "contrastive_min_gap", "contrastive_epochs", "residual_noise_scale",
+            "contrastive_min_gap", "residual_noise_scale",
         )
-    } | {"solver": "ridge", "bootstrap_unit": "task"})
+    }
+    if args.estimator == "linear":
+        estimator_fields.update(solver="ridge",bootstrap_unit="task",contrastive_epochs=args.contrastive_epochs)
+        if payload["estimator"].get("schema") != "amortized-utility-estimator-v2":
+            raise RuntimeError("checkpoint estimator type differs from the requested linear arm")
+    else:
+        estimator_fields.update(hidden_sizes=[int(v) for v in args.mlp_hidden_sizes.split(",")],
+                                epochs=args.mlp_epochs,learning_rate=args.mlp_learning_rate,
+                                batch_tasks=args.mlp_batch_tasks)
+        if payload["estimator"].get("schema") != "mlp-utility-estimator-v1":
+            raise RuntimeError("checkpoint estimator type differs from the requested MLP arm")
+    _require_fields("checkpoint estimator", payload["estimator"]["config"], estimator_fields)
     _require_fields("policy calibration", metadata["policy_calibration"], {
         "max_drops": 1, "delta": args.delta,
     })
+    if metadata["policy_calibration"].get("max_changed_harm_rate",1.0)!=args.max_changed_harm_rate:
+        raise RuntimeError("checkpoint calibrated with a different harm constraint")
     for context in contexts:
         _require_fields("checkpoint context", context, {
             "snapshot_design_hash": snapshot["design_hash"],
@@ -382,7 +442,11 @@ def _evaluation_complete(path: Path) -> bool:
     )
 
 
-def _validated_evaluation_complete(args: argparse.Namespace, path: Path, *, mode: str) -> bool:
+def _validated_evaluation_complete(
+    args: argparse.Namespace, path: Path, *, mode: str, command: Sequence[str] | None = None,
+    runner: Any = evaluation, benchmark: str = "HotpotQA_distractor_offline",
+    completed_field: str = "completed_questions",
+) -> bool:
     if not _evaluation_complete(path):
         return False
     manifest = _load_json(path / "run_manifest.json")
@@ -390,13 +454,13 @@ def _validated_evaluation_complete(args: argparse.Namespace, path: Path, *, mode
     if not manifest or not snapshot:
         raise RuntimeError(f"completed evaluation has no valid manifest: {path}")
     design, run = manifest.get("design", {}), manifest.get("run", {})
-    if (evaluation._stable_hash(design) != manifest.get("design_hash")
-            or evaluation._stable_hash(run) != manifest.get("run_hash")):
+    if (runner._stable_hash(design) != manifest.get("design_hash")
+            or runner._stable_hash(run) != manifest.get("run_hash")):
         raise RuntimeError(f"invalid evaluation manifest hash: {path}")
     expected_ids = snapshot["evaluation_ids"][args.training_claims:args.evaluation_count]
     _require_fields("completed evaluation", design, {
-        "runner_schema": evaluation.RUNNER_SCHEMA,
-        "benchmark": "HotpotQA_distractor_offline",
+        "runner_schema": runner.RUNNER_SCHEMA,
+        "benchmark": benchmark,
         "source_md5": snapshot["source_md5"],
         "snapshot_design_hash": snapshot["design_hash"],
         "evaluation_ids": expected_ids,
@@ -410,15 +474,18 @@ def _validated_evaluation_complete(args: argparse.Namespace, path: Path, *, mode
             ("trajectory", args.successful_topk), ("insight", args.insights_topk)
         ) if count > 0],
     })
-    child = evaluation.parse_args(_evaluation_command(args, mode=mode, output=path, resume=False)[4:])
-    seed_cache = child.cache_seed_from
+    command = command or _evaluation_command(args, mode=mode, output=path, resume=False,
+                                             runner_module=runner.__name__)
+    child = runner.parse_args(command[4:])
+    child.checkpoint = child.checkpoint.resolve() if child.checkpoint else None
+    seed_cache = child.cache_seed_from.resolve() if child.cache_seed_from else None
     _require_fields("completed evaluation run", run, {
         "mode": mode, "delta": child.delta, "kappa": child.kappa,
         "max_drops": child.max_drops,
         "checkpoint": str(child.checkpoint) if child.checkpoint else None,
-        "checkpoint_sha256": evaluation._file_sha256(child.checkpoint) if child.checkpoint else None,
+        "checkpoint_sha256": runner._file_sha256(child.checkpoint) if child.checkpoint else None,
         "cache_seed_from": str(seed_cache) if seed_cache else None,
-        "cache_seed_sha256": evaluation._file_sha256(seed_cache) if seed_cache else None,
+        "cache_seed_sha256": runner._file_sha256(seed_cache) if seed_cache else None,
     })
     rows = read_jsonl(path / "memory_gate.jsonl")
     ids = [int(row["task_id"]) for row in rows]
@@ -428,7 +495,7 @@ def _validated_evaluation_complete(args: argparse.Namespace, path: Path, *, mode
         if row.get("mode") != mode or row.get("run_metadata") != design:
             raise RuntimeError(f"evaluation log disagrees with its manifest: {path}")
     _require_fields("evaluation summary", _load_json(path / "summary.json") or {}, {
-        "completed_questions": len(expected_ids), "mode": mode,
+        completed_field: len(expected_ids), "mode": mode,
     })
     return True
 
@@ -550,15 +617,20 @@ def _diagnostic_command(args: argparse.Namespace) -> list[str]:
     return command
 
 
-def _train_command(args: argparse.Namespace) -> list[str]:
+def _train_command(args: argparse.Namespace, *, metric: str = "team_score") -> list[str]:
     seed0 = args.diagnostic_results / f"seed{args.sample_seed_base}" / "branches.jsonl"
     retest = args.diagnostic_results / f"seed{args.retest_seed_base}_retest" / "branches.jsonl"
     return [
         sys.executable, "-u", "-m", "causal_memory_control.train_gate",
-        "--input", str(seed0), str(retest), "--metric", "team_score",
+        "--input", str(seed0), str(retest), "--metric", metric,
         "--output", str(args.checkpoint),
         "--memory-dir", str(args.memory_dir),
-        "--feature-version", "2", "--solver", "ridge", "--bootstrap-unit", "task",
+        "--feature-version", str(args.feature_version), "--estimator", args.estimator,
+        "--solver", "ridge", "--bootstrap-unit", "task",
+        "--semantic-model",args.semantic_model,"--semantic-chunk-tokens",str(args.semantic_chunk_tokens),
+        "--mlp-hidden-sizes",args.mlp_hidden_sizes,"--mlp-epochs",str(args.mlp_epochs),
+        "--mlp-learning-rate",str(args.mlp_learning_rate),"--mlp-batch-tasks",str(args.mlp_batch_tasks),
+        "--mlp-device",args.mlp_device,
         "--residual-noise-scale", str(args.residual_noise_scale),
         "--direct-utility-weight", str(args.direct_utility_weight),
         "--contrastive-weight", str(args.contrastive_weight),
@@ -569,7 +641,9 @@ def _train_command(args: argparse.Namespace) -> list[str]:
         "--kappa-grid", args.kappa_grid,
         "--calibration-max-drops", str(args.max_drops),
         "--calibration-delta", str(args.delta),
-    ]
+        "--max-changed-harm-rate",str(args.max_changed_harm_rate),
+    ] + (["--semantic-revision",args.semantic_revision] if args.semantic_revision else []) + (
+        ["--semantic-cache",str(args.semantic_cache)] if args.semantic_cache else [])
 
 
 def _evaluation_command(
@@ -578,9 +652,10 @@ def _evaluation_command(
     mode: str,
     output: Path,
     resume: bool,
+    runner_module: str = "causal_memory_control.hotpotqa_experiment",
 ) -> list[str]:
     command = [
-        sys.executable, "-u", "-m", "causal_memory_control.hotpotqa_experiment",
+        sys.executable, "-u", "-m", runner_module,
         "--data", str(args.data), "--memory-dir", str(args.memory_dir),
         "--output-dir", str(output), "--endpoint", args.endpoint, "--model", args.model,
         "--evaluation-offset", str(args.training_claims), "--claims", str(args.final_claims),
@@ -605,6 +680,10 @@ def _evaluation_command(
                 "--cache-seed-from", str(args.output_dir / "native_gmemory" / "llm_cache.sqlite"),
             )
         )
+    elif args.baseline_cache_seed_from is not None:
+        command.extend(("--cache-seed-from",str(args.baseline_cache_seed_from)))
+    if args.semantic_cache is not None:
+        command.extend(("--semantic-cache",str(args.semantic_cache)))
     if resume:
         command.append("--resume")
     return command

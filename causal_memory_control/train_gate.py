@@ -61,7 +61,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--l2", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=23)
     parser.add_argument("--hash-dimensions", type=int, default=256)
-    parser.add_argument("--feature-version", type=int, choices=(1, 2), default=2)
+    parser.add_argument("--feature-version", type=int, choices=(1, 2, 3), default=2)
+    parser.add_argument("--estimator", choices=("linear", "mlp"), default="linear")
+    parser.add_argument("--semantic-model", default="sentence-transformers/all-MiniLM-L6-v2")
+    parser.add_argument("--semantic-revision", default=None)
+    parser.add_argument("--semantic-cache", type=Path, default=None)
+    parser.add_argument("--semantic-chunk-tokens", type=int, default=192)
+    parser.add_argument("--mlp-hidden-sizes", default="128,64")
+    parser.add_argument("--mlp-epochs", type=int, default=80)
+    parser.add_argument("--mlp-learning-rate", type=float, default=0.001)
+    parser.add_argument("--mlp-batch-tasks", type=int, default=16)
+    parser.add_argument("--mlp-device", default="cpu")
     parser.add_argument("--solver", choices=("sgd", "ridge"), default="ridge")
     parser.add_argument("--bootstrap-unit", choices=("event", "task"), default="task")
     parser.add_argument(
@@ -103,6 +113,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--calibration-seed", type=int, default=71)
     parser.add_argument("--calibration-max-drops", type=int, default=1)
     parser.add_argument("--calibration-delta", type=float, default=0.0)
+    parser.add_argument("--max-changed-harm-rate", type=float, default=1.0)
     parser.add_argument(
         "--exclude-residual-noise",
         action="store_true",
@@ -131,6 +142,8 @@ def load_examples(
     hash_dimensions: int,
     feature_version: int = 1,
     memory_dir: Path | None = None,
+    feature_builder: TeamExposureFeatureBuilder | None = None,
+    event_sink: list | None = None,
 ) -> list[PotentialOutcomeExample]:
     sources = [source] if isinstance(source, Path) else list(source)
     rows: list[dict[str, Any]] = []
@@ -162,6 +175,8 @@ def load_examples(
             task_ids=task_ids,
             hash_dimensions=hash_dimensions,
             feature_version=feature_version,
+            feature_builder=feature_builder,
+            event_sink=event_sink,
         )
     if len(sources) > 1:
         raise ValueError("multiple --input paths are supported only for branch rows")
@@ -219,6 +234,8 @@ def _examples_from_branches(
     task_ids: set[int] | None,
     hash_dimensions: int,
     feature_version: int = 1,
+    feature_builder: TeamExposureFeatureBuilder | None = None,
+    event_sink: list | None = None,
 ) -> list[PotentialOutcomeExample]:
     groups: dict[tuple[Any, str], dict[str, list[Mapping[str, Any]]]] = defaultdict(
         lambda: defaultdict(list)
@@ -235,11 +252,16 @@ def _examples_from_branches(
         groups[(task_id, candidate_id)][str(row.get("condition"))].append(row)
         observed_candidates[task_id][candidate_id] = _candidate(candidate)
 
-    feature_builder = TeamExposureFeatureBuilder(HashEmbedder(hash_dimensions), version=feature_version)
+    feature_builder = feature_builder or TeamExposureFeatureBuilder(HashEmbedder(hash_dimensions), version=feature_version)
     examples = []
-    for (task_id, candidate_id), conditions in sorted(
+    ordered = sorted(
         groups.items(), key=lambda item: (str(item[0][0]), item[0][1])
-    ):
+    )
+    if feature_builder.version == 3:
+        from tqdm import tqdm
+
+        ordered = tqdm(ordered,desc="Encode semantic events",unit="candidate")
+    for (task_id, candidate_id), conditions in ordered:
         if not conditions.get("use_all") or not conditions.get("global_drop"):
             continue
         use_rows, drop_rows = _matched_conditions(
@@ -285,6 +307,8 @@ def _examples_from_branches(
                 group_id=str(task_id),
             )
         )
+        if event_sink is not None:
+            event_sink.append((event, examples[-1]))
     return examples
 
 
@@ -467,6 +491,7 @@ def _calibrate_policy(
     kappas: Sequence[float],
     max_drops: int,
     delta: float = 0.0,
+    max_changed_harm_rate: float = 1.0,
 ) -> dict[str, Any]:
     """Choose a DROP confidence multiplier on held-out diagnostic tasks.
 
@@ -487,10 +512,19 @@ def _calibrate_policy(
     grouped: dict[str, list[PotentialOutcomeExample]] = defaultdict(list)
     for example in examples:
         grouped[example.group_id or example.event_id].append(example)
-    predictions_by_group = {
-        group_id: [(example, estimator.predict(example.features)) for example in group_examples]
-        for group_id, group_examples in grouped.items()
-    }
+    if hasattr(estimator,"predict_many"):
+        flat = [example for group_examples in grouped.values() for example in group_examples]
+        predicted = {}
+        for start in range(0,len(flat),256):
+            batch = flat[start:start+256]
+            predicted.update({id(e):p for e,p in zip(batch,estimator.predict_many([e.features for e in batch]))})
+        predictions_by_group = {group_id:[(e,predicted[id(e)]) for e in group_examples]
+                                for group_id,group_examples in grouped.items()}
+    else:
+        predictions_by_group = {
+            group_id: [(example, estimator.predict(example.features)) for example in group_examples]
+            for group_id, group_examples in grouped.items()
+        }
     candidates = [{
         "policy": "always_keep", "kappa": None,
         "calibration_tasks": len(grouped), "selected_drops": 0,
@@ -509,7 +543,13 @@ def _calibrate_policy(
                 upper = prediction.utility + float(kappa) * prediction.uncertainty
                 if prediction.calibrated and upper < -delta:
                     scored.append((upper, example))
-            selected = [row[1] for row in sorted(scored, key=lambda row: row[0])[:max_drops]]
+            def selection_key(row):
+                upper,example = row
+                kind = (0 if example.features.get("memory_type::trajectory",0) else
+                        1 if example.features.get("memory_type::insight",0) else 2)
+                return upper,kind,example.features.get("retrieval_rank",10**9)
+
+            selected = [row[1] for row in sorted(scored, key=selection_key)[:max_drops]]
             group_effect = sum(example.q_drop - example.q_use for example in selected)
             effects.append(group_effect)
             selected_count += len(selected)
@@ -535,7 +575,8 @@ def _calibrate_policy(
     # Maximize held-out reward, then prefer the more conservative multiplier
     # on ties. This permits bolder dropping only when held-out interventions
     # support it.
-    beneficial = [row for row in candidates if row["mean_observed_reward_delta"] > 0.0]
+    beneficial = [row for row in candidates if row["mean_observed_reward_delta"] > 0.0
+                  and row["harm_rate_among_changed"] <= max_changed_harm_rate]
     selected = (max(beneficial, key=lambda row: (row["mean_observed_reward_delta"], row["kappa"]))
                 if beneficial else candidates[0])
     return {
@@ -544,6 +585,7 @@ def _calibrate_policy(
         "objective": "maximize_mean_observed_reward_delta_then_larger_kappa",
         "max_drops": max_drops,
         "delta": delta,
+        "max_changed_harm_rate": max_changed_harm_rate,
         "recommended_kappa": selected["kappa"] if selected["kappa"] is not None else max(kappas),
         "recommended_max_drops": 0 if selected["policy"] == "always_keep" else 1,
         "calibration_task_ids": sorted(grouped),
@@ -572,6 +614,8 @@ def main(argv: Sequence[str] | None = None) -> Path:
         raise SystemExit("contrastive settings must be non-negative")
     if not 0.0 <= args.calibration_fraction < 1.0:
         raise SystemExit("--calibration-fraction must be in [0,1)")
+    if not 0<=args.max_changed_harm_rate<=1:
+        raise SystemExit("--max-changed-harm-rate must be in [0,1]")
     if args.calibration_max_drops != 1:
         raise SystemExit("single-candidate calibration requires --calibration-max-drops 1")
     if not math.isfinite(args.calibration_delta) or args.calibration_delta < 0:
@@ -591,6 +635,17 @@ def main(argv: Sequence[str] | None = None) -> Path:
         if args.residual_noise_scale is None
         else float(args.residual_noise_scale)
     )
+    encoder = None
+    feature_builder = None
+    if args.feature_version == 3:
+        from .semantic_features import SentenceTransformerEmbedder, SemanticTeamFeatureBuilder
+
+        encoder = SentenceTransformerEmbedder(args.semantic_model, revision=args.semantic_revision,
+            cache_path=args.semantic_cache, chunk_tokens=args.semantic_chunk_tokens)
+        feature_builder = SemanticTeamFeatureBuilder(encoder)
+    if args.estimator == "mlp" and args.feature_version != 3:
+        raise SystemExit("the semantic MLP arm requires --feature-version 3")
+    events = []
     examples = load_examples(
         args.input,
         metric=args.metric,
@@ -598,7 +653,11 @@ def main(argv: Sequence[str] | None = None) -> Path:
         hash_dimensions=args.hash_dimensions,
         feature_version=args.feature_version,
         memory_dir=args.memory_dir,
+        feature_builder=feature_builder,
+        event_sink=events,
     )
+    if encoder is not None and not events:
+        raise SystemExit("semantic features require branch rows with original text, not direct precomputed examples")
     fit_examples, calibration_examples = _split_calibration_examples(
         examples,
         fraction=args.calibration_fraction,
@@ -611,22 +670,41 @@ def main(argv: Sequence[str] | None = None) -> Path:
     if missing_scope:
         raise SystemExit("calibration contains candidates absent from fitting tasks: "
                          + ", ".join(missing_scope))
-    estimator = AmortizedUtilityEstimator(
-        ensemble_size=args.ensemble_size,
-        min_samples=args.min_samples,
-        learning_rate=args.learning_rate,
-        epochs=args.epochs,
-        l2=args.l2,
-        seed=args.seed,
-        residual_noise_scale=residual_noise_scale,
-        direct_utility_weight=args.direct_utility_weight,
-        contrastive_weight=args.contrastive_weight,
-        contrastive_margin=args.contrastive_margin,
-        contrastive_min_gap=args.contrastive_min_gap,
-        contrastive_epochs=args.contrastive_epochs,
-        solver=args.solver,
-        bootstrap_unit=args.bootstrap_unit,
-    )
+    if args.estimator == "mlp":
+        from .neural_estimator import MLPUtilityEstimator
+
+        try:
+            hidden_sizes = [int(width) for width in args.mlp_hidden_sizes.split(",")]
+        except ValueError as exc:
+            raise SystemExit("--mlp-hidden-sizes must contain positive integers") from exc
+        estimator = MLPUtilityEstimator(
+            ensemble_size=args.ensemble_size, min_samples=args.min_samples,
+            hidden_sizes=hidden_sizes, epochs=args.mlp_epochs,
+            learning_rate=args.mlp_learning_rate, batch_tasks=args.mlp_batch_tasks,
+            device=args.mlp_device, l2=args.l2, seed=args.seed,
+            direct_utility_weight=args.direct_utility_weight,
+            contrastive_weight=args.contrastive_weight,
+            contrastive_margin=args.contrastive_margin,
+            contrastive_min_gap=args.contrastive_min_gap,
+            residual_noise_scale=residual_noise_scale,
+        )
+    else:
+        estimator = AmortizedUtilityEstimator(
+            ensemble_size=args.ensemble_size,
+            min_samples=args.min_samples,
+            learning_rate=args.learning_rate,
+            epochs=args.epochs,
+            l2=args.l2,
+            seed=args.seed,
+            residual_noise_scale=residual_noise_scale,
+            direct_utility_weight=args.direct_utility_weight,
+            contrastive_weight=args.contrastive_weight,
+            contrastive_margin=args.contrastive_margin,
+            contrastive_min_gap=args.contrastive_min_gap,
+            contrastive_epochs=args.contrastive_epochs,
+            solver=args.solver,
+            bootstrap_unit=args.bootstrap_unit,
+        )
     if not estimator.fit(fit_examples, progress=True):
         raise SystemExit(
             f"only {len(fit_examples)} fitting events after calibration split; "
@@ -638,6 +716,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
         kappas=kappa_grid,
         max_drops=args.calibration_max_drops,
         delta=args.calibration_delta,
+        max_changed_harm_rate=args.max_changed_harm_rate,
     )
     recorded_task_ids = (
         sorted(args.task_ids)
@@ -649,6 +728,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
         estimator,
         hash_dimensions=args.hash_dimensions,
         feature_version=args.feature_version,
+        feature_config={"encoder": encoder.config()} if encoder is not None else None,
         training_metadata={
             "metric": args.metric,
             "training_events": len(examples),
@@ -669,7 +749,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
             "fit_task_ids": sorted({e.group_id for e in fit_examples if e.group_id}),
             "residual_noise_scale": residual_noise_scale,
             "estimator": {
-                "type": "hybrid_t_direct_utility",
+                "type": "mlp_three_head" if args.estimator == "mlp" else "hybrid_t_direct_utility",
                 "direct_utility_weight": args.direct_utility_weight,
                 "contrastive_weight": args.contrastive_weight,
                 "contrastive_margin": args.contrastive_margin,
@@ -679,9 +759,15 @@ def main(argv: Sequence[str] | None = None) -> Path:
             },
             "policy_calibration": policy_calibration,
             "training_contexts": _training_contexts(args.input),
+            "candidate_content_overlap": _candidate_overlap_report(events, fit_examples, calibration_examples),
         },
     )
-    predictions = [estimator.predict(example.features) for example in fit_examples]
+    if hasattr(estimator,"predict_many"):
+        predictions = []
+        for start in range(0,len(fit_examples),256):
+            predictions.extend(estimator.predict_many([example.features for example in fit_examples[start:start+256]]))
+    else:
+        predictions = [estimator.predict(example.features) for example in fit_examples]
     utility_rmse = (
         sum(
             (
@@ -711,7 +797,28 @@ def main(argv: Sequence[str] | None = None) -> Path:
             indent=2,
         )
     )
+    if encoder is not None:
+        encoder.close()
     return args.output
+
+
+def _candidate_overlap_report(events, fit_examples, calibration_examples):
+    """Describe shared memory content; task-disjoint is not candidate-disjoint."""
+    import hashlib
+
+    fit_ids = {e.group_id for e in fit_examples}
+    calibration_ids = {e.group_id for e in calibration_examples}
+    fit, calibration = set(), set()
+    for event, example in events:
+        key = hashlib.sha256((event.memory.memory_type + "\n" + event.memory.content).encode()).hexdigest()
+        if example.group_id in fit_ids:
+            fit.add(key)
+        if example.group_id in calibration_ids:
+            calibration.add(key)
+    return {"split_unit": "task", "fit_unique_contents": len(fit),
+            "calibration_unique_contents": len(calibration),
+            "shared_contents": len(fit & calibration),
+            "candidate_disjoint": not bool(fit & calibration)}
 
 
 def _candidate_kinds(examples: Sequence[PotentialOutcomeExample]) -> list[str]:

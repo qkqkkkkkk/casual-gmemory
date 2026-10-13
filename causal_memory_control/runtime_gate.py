@@ -38,6 +38,7 @@ class ExposureDecision:
     retrieval_rank: int | None = None
     memory_content: str = ""
     memory_metadata: Mapping[str, Any] = field(default_factory=dict)
+    policy_scores: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -51,6 +52,7 @@ class ExposureDecision:
             "retrieval_rank": self.retrieval_rank,
             "memory_content": self.memory_content,
             "memory_metadata": dict(self.memory_metadata),
+            "policy_scores": dict(self.policy_scores),
         }
 
 
@@ -166,17 +168,42 @@ class GMemoryExposureGate:
         payload = json.loads(Path(checkpoint_path).read_text(encoding="utf-8"))
         if payload.get("schema") != CHECKPOINT_SCHEMA:
             raise ValueError("unsupported GMemory exposure-gate checkpoint")
+        if "jev_policy" in payload:
+            from .jev_gate import gate_from_checkpoint
+
+            return gate_from_checkpoint(checkpoint_path, payload, **kwargs)
+        kwargs.pop("jev_cache_path", None)
         feature_config = payload.get("feature_builder", {})
         feature_type = feature_config.get("type")
-        if feature_type not in ("team-exposure-features-v1", "team-exposure-features-v2"):
+        if feature_type not in ("team-exposure-features-v1", "team-exposure-features-v2", "team-exposure-features-v3"):
             raise ValueError("unsupported exposure feature schema")
-        feature_version = 2 if feature_type.endswith("v2") else 1
+        feature_version = int(feature_type[-1])
         # Old checkpoints learned from bare strings. Restoring nonzero support
         # counts for them would silently change their input distribution.
         if feature_version == 1:
             kwargs.pop("memory_dir", None)
         dimensions = int(feature_config.get("hash_dimensions", 256))
-        estimator = AmortizedUtilityEstimator.from_dict(payload["estimator"])
+        if payload["estimator"].get("schema") == "mlp-utility-estimator-v1":
+            from .neural_estimator import MLPUtilityEstimator
+
+            estimator = MLPUtilityEstimator.from_dict(payload["estimator"])
+        else:
+            estimator = AmortizedUtilityEstimator.from_dict(payload["estimator"])
+        if feature_version == 3:
+            from .semantic_features import SentenceTransformerEmbedder, SemanticTeamFeatureBuilder
+
+            config = feature_config["encoder"]
+            if config.get("type") != "sentence-transformer-chunk-mean-v1":
+                raise ValueError("unsupported semantic encoder")
+            builder = SemanticTeamFeatureBuilder(SentenceTransformerEmbedder(
+                config["model"], revision=config.get("revision"),
+                chunk_tokens=int(config["chunk_tokens"]),
+                expected_dimensions=config.get("dimensions"),
+                cache_path=kwargs.pop("semantic_cache_path", Path(checkpoint_path).with_suffix(".embeddings.sqlite")),
+            ))
+        else:
+            kwargs.pop("semantic_cache_path", None)
+            builder = TeamExposureFeatureBuilder(HashEmbedder(dimensions), version=feature_version)
         checkpoint_metadata = dict(payload.get("training_metadata", {}))
         trained_kinds = set(checkpoint_metadata.get("candidate_kinds", ()))
         if trained_kinds:
@@ -237,7 +264,7 @@ class GMemoryExposureGate:
             )
         return cls(
             estimator=estimator,
-            feature_builder=TeamExposureFeatureBuilder(HashEmbedder(dimensions), version=feature_version),
+            feature_builder=builder,
             checkpoint_metadata=checkpoint_metadata,
             **kwargs,
         )
@@ -292,7 +319,7 @@ class GMemoryExposureGate:
                 (row for row in provisional if row.action == ExposureAction.DROP),
                 key=lambda row: row.upper_utility_bound,
             )[: self.max_drops]
-        } if self.mode == "learned" and self.max_drops is not None else {
+        } if self.mode in {"learned", "jev_direct", "jev_decomposed"} and self.max_drops is not None else {
             row.memory_id for row in provisional if row.action == ExposureAction.DROP
         }
 
@@ -455,7 +482,7 @@ class GMemoryExposureGate:
         return {key: self._task_config[key] for key in keys if key in self._task_config}
 
     def _event_task_metadata(self) -> dict[str, Any]:
-        if self.feature_builder.version == 2:
+        if self.feature_builder.version >= 2:
             # Experiment seeds and snapshot settings are audit metadata, not
             # task state. Diagnostic examples do not contain those fields.
             return task_context_metadata(self._task_config)
@@ -505,6 +532,11 @@ class GMemoryExposureGate:
             completed.add(task_id)
         return completed
 
+    def close(self):
+        close = getattr(self.feature_builder.embedder, "close", None)
+        if close:
+            close()
+
 
 def save_gate_checkpoint(
     path: str | Path,
@@ -512,6 +544,7 @@ def save_gate_checkpoint(
     *,
     hash_dimensions: int = 256,
     feature_version: int = 1,
+    feature_config: Mapping[str, Any] | None = None,
     training_metadata: Mapping[str, Any] | None = None,
 ) -> None:
     payload = {
@@ -519,6 +552,7 @@ def save_gate_checkpoint(
         "feature_builder": {
             "type": f"team-exposure-features-v{feature_version}",
             "hash_dimensions": int(hash_dimensions),
+            **dict(feature_config or {}),
         },
         "estimator": estimator.to_dict(),
         "training_metadata": dict(training_metadata or {}),
