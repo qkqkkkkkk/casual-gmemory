@@ -112,8 +112,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--claims", type=int, default=100)
     parser.add_argument("--evaluation-offset", type=int, default=0)
     parser.add_argument(
-        "--mode", choices=("always_keep", "always_drop", "learned", "jev_direct", "jev_decomposed"), default="always_keep"
+        "--mode", choices=("always_keep", "always_drop", "learned", "jev_direct", "jev_decomposed", "planned_drop"), default="always_keep"
     )
+    parser.add_argument("--intervention-plan", type=Path, default=None)
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--endpoint", default=None)
     parser.add_argument("--api-key", default=None)
@@ -142,6 +143,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def _validate_args(args: argparse.Namespace) -> None:
+    from .planned_drop import validate_plan_args
+
+    validate_plan_args(args)
     if args.claims < 1 or args.evaluation_offset < 0:
         raise SystemExit("--claims must be positive and --evaluation-offset non-negative")
     if args.node_num < 2:
@@ -394,6 +398,9 @@ def main(argv: Sequence[str] | None = None) -> Path:
         "cache_seed_from": str(cache_seed) if cache_seed else None,
         "cache_seed_sha256": _file_sha256(cache_seed) if cache_seed else None,
     }
+    from .planned_drop import PlannedDropGate, plan_run_metadata
+
+    run.update(plan_run_metadata(args, selected_ids))
     _prepare_output(args, design, run)
 
     log_path = args.output_dir / "memory_gate.jsonl"
@@ -430,7 +437,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
         "log_path": log_path,
         "resume": args.resume,
     }
-    gate = (
+    gate = PlannedDropGate(args.intervention_plan, **gate_kwargs) if args.mode == "planned_drop" else (
         GMemoryExposureGate.from_checkpoint(args.checkpoint, **gate_kwargs,
             semantic_cache_path=args.semantic_cache or args.output_dir / "semantic_cache.sqlite",
             jev_cache_path=args.jev_cache or args.output_dir / "jev_cache.sqlite")

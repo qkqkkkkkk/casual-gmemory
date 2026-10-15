@@ -1,5 +1,10 @@
 # 同一个入口切换数据集
 
+若需要使用全部有效数据、同时比较 FEVER/HotpotQA，并输出包含 Always Global Drop、
+Random Drop、三个 Gate 和同样本事后 Oracle 的七行表格，请使用
+[全量七策略入口](FULL_GATE_BENCHMARK.md)。默认 Global Drop 清空本题全部检索 memory，
+Oracle 明确标注为使用测试结果的不可部署参考。
+
 统一入口：`python -m causal_memory_control.run_gate_matrix`。
 通过 `--dataset hotpotqa` 或 `--dataset fever` 切换数据加载、冻结 memory 的
 构建和校验、反事实采集、评测环境以及报告指标。训练、开发集策略选择、公共

@@ -6,6 +6,13 @@ or `--dataset fever`.
 Dataset selection, server commands, resumable runs and extension adapters are
 documented in [DATASET_GATE_MATRIX.md](DATASET_GATE_MATRIX.md).
 
+For a full-data, two-dataset seven-policy table (including the no-memory
+Global DROP control, Random DROP and a post-hoc same-sample Oracle), use
+`python -m causal_memory_control.run_full_gate_benchmark`.
+See [FULL_GATE_BENCHMARK.md](FULL_GATE_BENCHMARK.md) for planning, server commands,
+policy definitions, audit logs and resumable execution. The existing estimator
+architectures and losses are unchanged.
+
 FEVER and HotpotQA evaluations clear worker and decision-node buffers before
 each independent task, preserving collaboration within that task. Comparison
 runners archive pre-isolation v1 evaluations under `evaluation_backups/` and
