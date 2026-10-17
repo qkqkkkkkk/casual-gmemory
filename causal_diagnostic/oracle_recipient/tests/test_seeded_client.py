@@ -29,6 +29,7 @@ class BinaryLabelProbabilityTests(unittest.TestCase):
                 api_base="http://127.0.0.1:1/v1",
             )
             fake = SimpleNamespace(
+                close=lambda: None,
                 chat=SimpleNamespace(
                     completions=SimpleNamespace(
                         create=lambda **_: _response((" A", -0.2), ("B", -1.2))

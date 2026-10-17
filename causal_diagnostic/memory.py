@@ -8,6 +8,7 @@ from typing import Sequence
 
 from mas.memory.common import MASMessage
 from mas.memory.mas_memory.GMemory import GMemory
+from mas.memory.mas_memory.memory_base import MASMemoryBase
 
 
 @dataclass(frozen=True)
@@ -72,3 +73,32 @@ class FrozenReadOnlyGMemory(GMemory):
             copy.deepcopy(list(self._frozen_retrieval.failed)),
             copy.deepcopy(list(self._frozen_retrieval.insights)),
         )
+
+
+class FrozenBranchMemory(MASMemoryBase):
+    """Branch-local task state over an already retrieved, immutable snapshot.
+
+    No Chroma, graph, insight manager or embedding model is opened here. The
+    live retrieval session verifies the persistent record count; this count is
+    descriptive, not a per-branch reread of the persistent backend. All writes
+    are no-ops inherited from MASMemoryBase, while task contexts remain fresh.
+    """
+
+    def __init__(self, *, frozen_retrieval: FrozenRetrieval, memory_records: int):
+        if memory_records < 0:
+            raise ValueError("memory_records must be non-negative")
+        # MASMemoryBase.__post_init__ creates a persistent directory. Branches
+        # deliberately have no persistent backend and never call that method.
+        self.namespace = "frozen-branch"
+        self.global_config = {"read_only": True}
+        self.llm_model = self.embedding_func = None
+        self._retrieval_gate = None
+        self._frozen_retrieval = frozen_retrieval
+        self._memory_records = int(memory_records)
+        self.current_task_context = None
+
+    retrieve_memory = FrozenReadOnlyGMemory.retrieve_memory
+
+    @property
+    def memory_size(self) -> int:
+        return self._memory_records

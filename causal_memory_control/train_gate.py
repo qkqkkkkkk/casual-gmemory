@@ -47,6 +47,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="One or more branch JSONL files/directories, or one direct JSON/JSONL file",
     )
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--stream-branches", action="store_true",
+        help="Validate and group full branch logs via temporary SQLite instead of loading all raw text into RAM")
     parser.add_argument("--metric", default="success")
     parser.add_argument(
         "--task-ids",
@@ -62,7 +64,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=23)
     parser.add_argument("--hash-dimensions", type=int, default=256)
     parser.add_argument("--feature-version", type=int, choices=(1, 2, 3), default=2)
-    parser.add_argument("--estimator", choices=("linear", "mlp"), default="linear")
+    parser.add_argument("--estimator", choices=("linear", "mlp", "st"), default="linear")
+    from .st_estimator import add_st_arguments
+
+    add_st_arguments(parser)
     parser.add_argument("--semantic-model", default="sentence-transformers/all-MiniLM-L6-v2")
     parser.add_argument("--semantic-revision", default=None)
     parser.add_argument("--semantic-cache", type=Path, default=None)
@@ -236,6 +241,7 @@ def _examples_from_branches(
     feature_version: int = 1,
     feature_builder: TeamExposureFeatureBuilder | None = None,
     event_sink: list | None = None,
+    progress: bool = True,
 ) -> list[PotentialOutcomeExample]:
     groups: dict[tuple[Any, str], dict[str, list[Mapping[str, Any]]]] = defaultdict(
         lambda: defaultdict(list)
@@ -257,7 +263,7 @@ def _examples_from_branches(
     ordered = sorted(
         groups.items(), key=lambda item: (str(item[0][0]), item[0][1])
     )
-    if feature_builder.version == 3:
+    if feature_builder.version == 3 and progress:
         from tqdm import tqdm
 
         ordered = tqdm(ordered,desc="Encode semantic events",unit="candidate")
@@ -643,10 +649,15 @@ def main(argv: Sequence[str] | None = None) -> Path:
         encoder = SentenceTransformerEmbedder(args.semantic_model, revision=args.semantic_revision,
             cache_path=args.semantic_cache, chunk_tokens=args.semantic_chunk_tokens)
         feature_builder = SemanticTeamFeatureBuilder(encoder)
-    if args.estimator == "mlp" and args.feature_version != 3:
-        raise SystemExit("the semantic MLP arm requires --feature-version 3")
+    if args.estimator in ("mlp", "st") and args.feature_version != 3:
+        raise SystemExit("semantic MLP/ST estimators require --feature-version 3")
     events = []
-    examples = load_examples(
+    example_loader = load_examples
+    if args.estimator == "st" or args.stream_branches:
+        from .st_data import load_st_examples
+
+        example_loader = load_st_examples
+    examples = example_loader(
         args.input,
         metric=args.metric,
         task_ids=args.task_ids,
@@ -655,6 +666,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
         memory_dir=args.memory_dir,
         feature_builder=feature_builder,
         event_sink=events,
+        **({"progress_label": "Gate"} if args.stream_branches and args.estimator != "st" else {}),
     )
     if encoder is not None and not events:
         raise SystemExit("semantic features require branch rows with original text, not direct precomputed examples")
@@ -670,7 +682,13 @@ def main(argv: Sequence[str] | None = None) -> Path:
     if missing_scope:
         raise SystemExit("calibration contains candidates absent from fitting tasks: "
                          + ", ".join(missing_scope))
-    if args.estimator == "mlp":
+    if args.estimator == "st":
+        from .st_estimator import STUtilityEstimator, st_settings
+
+        estimator = STUtilityEstimator(**st_settings(args), ensemble_size=args.ensemble_size,
+            min_samples=args.min_samples, seed=args.seed, l2=args.l2,
+            residual_noise_scale=residual_noise_scale)
+    elif args.estimator == "mlp":
         from .neural_estimator import MLPUtilityEstimator
 
         try:
@@ -721,6 +739,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
     recorded_task_ids = (
         sorted(args.task_ids)
         if args.task_ids is not None
+        else sorted({int(e.group_id) for e in examples}) if args.estimator == "st" or args.stream_branches
         else _training_task_ids(args.input)
     )
     save_gate_checkpoint(
@@ -731,6 +750,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
         feature_config={"encoder": encoder.config()} if encoder is not None else None,
         training_metadata={
             "metric": args.metric,
+            "branch_loader": "sqlite_task_stream_v1" if args.estimator == "st" or args.stream_branches else "in_memory_v1",
             "training_events": len(examples),
             "estimator_fit_events": len(fit_examples),
             "calibration_events": len(calibration_examples),
@@ -748,7 +768,19 @@ def main(argv: Sequence[str] | None = None) -> Path:
             "candidate_kind_ranks": _candidate_kind_ranks(fit_examples),
             "fit_task_ids": sorted({e.group_id for e in fit_examples if e.group_id}),
             "residual_noise_scale": residual_noise_scale,
-            "estimator": {
+            "estimator": ({
+                "type": "st_single_direct_u",
+                "paper": "Influence Guided Context Selection, arXiv:2509.21359v2, eqs.6-7",
+                "loss": "inverse_list_rarity_weighted_mse + beta * same_task_hidden_dot_product_infonce",
+                "config": estimator.config,
+                "training_diagnostics": estimator.training_diagnostics,
+                "adaptations": ["frozen semantic features and MLP; not BERT/global self-attention",
+                    "USE-minus-DROP task rewards; not generator cross-entropy CI",
+                    "binned normalized capped list rarity weights; thresholds on reward scale",
+                    "average all valid same-task positives; skip anchors without positive or negative",
+                    "no cross-instance recombination or downsampling; no unmeasured labels",
+                    "existing held-out kappa calibration and at-most-one-DROP gate retained"],
+            } if args.estimator == "st" else {
                 "type": "mlp_three_head" if args.estimator == "mlp" else "hybrid_t_direct_utility",
                 "direct_utility_weight": args.direct_utility_weight,
                 "contrastive_weight": args.contrastive_weight,
@@ -756,7 +788,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
                 "contrastive_min_gap": args.contrastive_min_gap,
                 "contrastive_epochs": args.contrastive_epochs,
                 "contrastive_pairs": estimator.contrastive_pairs,
-            },
+            }),
             "policy_calibration": policy_calibration,
             "training_contexts": _training_contexts(args.input),
             "candidate_content_overlap": _candidate_overlap_report(events, fit_examples, calibration_examples),
@@ -786,12 +818,13 @@ def main(argv: Sequence[str] | None = None) -> Path:
                 "calibration_events": len(calibration_examples),
                 "metric": args.metric,
                 "residual_noise_scale": residual_noise_scale,
-                "direct_utility_weight": args.direct_utility_weight,
-                "contrastive_weight": args.contrastive_weight,
+                "direct_utility_weight": 1.0 if args.estimator == "st" else args.direct_utility_weight,
+                "contrastive_weight": estimator.config["beta"] if args.estimator == "st" else args.contrastive_weight,
                 "contrastive_pairs": estimator.contrastive_pairs,
                 "recommended_kappa": policy_calibration.get("recommended_kappa"),
                 "held_in_utility_rmse": utility_rmse,
                 "warning": "held-in fit is diagnostic only; evaluate on disjoint tasks",
+                **({"st_training_diagnostics": estimator.training_diagnostics} if args.estimator == "st" else {}),
             },
             ensure_ascii=False,
             indent=2,
@@ -810,7 +843,8 @@ def _candidate_overlap_report(events, fit_examples, calibration_examples):
     calibration_ids = {e.group_id for e in calibration_examples}
     fit, calibration = set(), set()
     for event, example in events:
-        key = hashlib.sha256((event.memory.memory_type + "\n" + event.memory.content).encode()).hexdigest()
+        key = (event.content_fingerprint if hasattr(event, "content_fingerprint") else
+               hashlib.sha256((event.memory.memory_type + "\n" + event.memory.content).encode()).hexdigest())
         if example.group_id in fit_ids:
             fit.add(key)
         if example.group_id in calibration_ids:

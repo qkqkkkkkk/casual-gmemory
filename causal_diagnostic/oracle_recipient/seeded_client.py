@@ -255,4 +255,7 @@ class SeededCachedChat:
         ) from last_error
 
     def close(self) -> None:
-        self.db.close()
+        try:
+            self.db.close()
+        finally:
+            self.client.close()

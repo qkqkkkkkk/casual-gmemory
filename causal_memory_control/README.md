@@ -13,6 +13,20 @@ See [FULL_GATE_BENCHMARK.md](FULL_GATE_BENCHMARK.md) for planning, server comman
 policy definitions, audit logs and resumable execution. The existing estimator
 architectures and losses are unchanged.
 
+To train/evaluate the three existing gates using only the completed first
+diagnostic collection group, use `python -m causal_memory_control.run_seed0_gate_matrix`.
+It defaults to FEVER, imports the original full-run settings, writes separate
+results and never starts the second collection group. See
+[SEED0_GATE_MATRIX.md](SEED0_GATE_MATRIX.md) for server/upload commands, logs,
+resume behavior and the FEVER/HotpotQA collector scheduling optimizations.
+
+For the new **ST-only** direct-utility + representation-InfoNCE adaptation of
+*Influence Guided Context Selection* (no E2E), use
+`python -m causal_memory_control.run_st_gate_benchmark`.
+It reuses full-data diagnostics, frozen memory and baseline without rerunning
+other gates. See [ST_GATE_BENCHMARK.md](ST_GATE_BENCHMARK.md) for server commands,
+the exact paper adaptations, loss, logs and recovery behavior.
+
 FEVER and HotpotQA evaluations clear worker and decision-node buffers before
 each independent task, preserving collaboration within that task. Comparison
 runners archive pre-isolation v1 evaluations under `evaluation_backups/` and

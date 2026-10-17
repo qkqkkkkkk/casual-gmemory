@@ -63,7 +63,8 @@ from causal_diagnostic.hotpotqa_oracle_recipient.utils import (
     memory_config,
     seed_everything,
 )
-from causal_diagnostic.memory import FrozenReadOnlyGMemory, FrozenRetrieval
+from causal_diagnostic.memory import FrozenBranchMemory, FrozenRetrieval
+from causal_diagnostic.collection_runtime import BranchIndex, RetrievalSession, SharedUseAll
 from causal_diagnostic.hotpotqa_oracle_recipient.analysis import write_analysis
 from causal_diagnostic.oracle_recipient.masked_macnet import (
     MemoryMaskPolicy,
@@ -459,6 +460,7 @@ def _run_branch(
     *,
     candidate_kind: str,
     candidate_index: int,
+    memory_records: int | None = None,
 ) -> tuple[dict[str, Any], int, int]:
     seed_everything(sample_seed)
     branch_task = copy.deepcopy(dict(task))
@@ -471,96 +473,101 @@ def _run_branch(
         api_base=args.endpoint,
         api_key=args.api_key,
     )
-    memory = FrozenReadOnlyGMemory(
-        namespace=args.memory_dir.name,
-        global_config=memory_config(args.memory_dir),
-        llm_model=client,
-        embedding_func=EmbeddingFunc(args.embedding_model),
-        frozen_retrieval=frozen,
-    )
-    mas = RecipientMaskedMacNet()
-    mas.build_system(
-        ReasoningIO(llm_model=client),
-        memory,
-        env,
-        {
-            "graph_type": args.graph_type,
-            "node_num": args.node_num,
-            "use_critic": False,
-            "successful_topk": args.successful_topk,
-            "failed_topk": args.failed_topk,
-            "insights_topk": args.insights_topk,
-            "threshold": args.threshold,
-            "use_projector": False,
-        },
-    )
-    actual_recipients = tuple(node.id for node in mas._agent_nodes.values())
-    if actual_recipients != tuple(recipients):
-        client.close()
-        raise RuntimeError(
-            f"MacNet recipient mismatch: expected {recipients}, got {actual_recipients}"
-        )
-    mas.set_memory_policy(
-        _policy(
-            condition,
-            recipients,
-            candidate_kind=candidate_kind,
-            candidate_index=candidate_index,
-        )
-    )
-    configure_hotpotqa_sampling(mas, args.temperature)
-    for agent in mas.agents_team.values():
-        agent.add_task_instruction(HOTPOTQA_SYSTEM_PROMPT)
-    mas._decision_node._agent.add_task_instruction(HOTPOTQA_SYSTEM_PROMPT)
-    before = memory.memory_size
-    calls_before, hits_before = client.calls, client.cache_hits
-    reward, done = mas.schedule(branch_task)
-    calls = client.calls - calls_before
-    hits = client.cache_hits - hits_before
-    after = memory.memory_size
-    client.close()
-    if after != before:
-        raise RuntimeError("read-only GMemory changed persistent memory size")
-    _validate_exposure(mas.execution_trace, condition, recipients)
-    outcome = {
-        "success": bool(done),
-        "reward": float(reward),
-        "steps": int(env.infos["steps"]),
-        "team_score": float(reward),
-        "score_definition": "official_hotpotqa_normalized_answer_token_f1",
-        "prediction": env.last_prediction,
-        "gold_answer": branch_task["answer"],
-        "answer_metrics": env.last_metrics,
-        "memory_records_before": before,
-        "memory_records_after": after,
-    }
-    if not args.gate_training_only:
-        decision_evidence_metric = score_supporting_facts(
-            mas.execution_trace[-1]["decision"]["raw_output"],
-            branch_task.get("gold_evidence_page_sets", []),
-        )
-        outcome.update(
-            local_metrics={
-                name: score_supporting_facts(
-                    mas.execution_trace[-1]["workers"][name]["raw_output"],
-                    branch_task.get("gold_evidence_page_sets", []),
-                )
-                for name in recipients
+    try:
+        if memory_records is None:
+            memory_records = int(json.loads(
+                (args.memory_dir / "causal_snapshot_manifest.json").read_text(encoding="utf-8")
+            )["memory_records"])
+        memory = FrozenBranchMemory(frozen_retrieval=frozen, memory_records=memory_records)
+        mas = RecipientMaskedMacNet()
+        mas.build_system(
+            ReasoningIO(llm_model=client),
+            memory,
+            env,
+            {
+                "graph_type": args.graph_type,
+                "node_num": args.node_num,
+                "use_critic": False,
+                "successful_topk": args.successful_topk,
+                "failed_topk": args.failed_topk,
+                "insights_topk": args.insights_topk,
+                "threshold": args.threshold,
+                "use_projector": False,
             },
-            actions=[
-                step["decision"]["processed_action"]
-                for step in mas.execution_trace
-            ],
-            trace=mas.execution_trace,
-            decision_evidence_metric=decision_evidence_metric,
-            decision_evidence_f1=decision_evidence_metric["f1"],
         )
-    return outcome, calls, hits
+        actual_recipients = tuple(node.id for node in mas._agent_nodes.values())
+        if actual_recipients != tuple(recipients):
+            raise RuntimeError(
+                f"MacNet recipient mismatch: expected {recipients}, got {actual_recipients}"
+            )
+        mas.set_memory_policy(
+            _policy(
+                condition,
+                recipients,
+                candidate_kind=candidate_kind,
+                candidate_index=candidate_index,
+            )
+        )
+        configure_hotpotqa_sampling(mas, args.temperature)
+        for agent in mas.agents_team.values():
+            agent.add_task_instruction(HOTPOTQA_SYSTEM_PROMPT)
+        mas._decision_node._agent.add_task_instruction(HOTPOTQA_SYSTEM_PROMPT)
+        before = memory.memory_size
+        calls_before, hits_before = client.calls, client.cache_hits
+        reward, done = mas.schedule(branch_task)
+        calls = client.calls - calls_before
+        hits = client.cache_hits - hits_before
+        after = memory.memory_size
+        if after != before:
+            raise RuntimeError("read-only GMemory changed persistent memory size")
+        _validate_exposure(mas.execution_trace, condition, recipients)
+        outcome = {
+            "success": bool(done),
+            "reward": float(reward),
+            "steps": int(env.infos["steps"]),
+            "team_score": float(reward),
+            "score_definition": "official_hotpotqa_normalized_answer_token_f1",
+            "prediction": env.last_prediction,
+            "gold_answer": branch_task["answer"],
+            "answer_metrics": env.last_metrics,
+            "memory_records_before": before,
+            "memory_records_after": after,
+        }
+        if not args.gate_training_only:
+            decision_evidence_metric = score_supporting_facts(
+                mas.execution_trace[-1]["decision"]["raw_output"],
+                branch_task.get("gold_evidence_page_sets", []),
+            )
+            outcome.update(
+                local_metrics={
+                    name: score_supporting_facts(
+                        mas.execution_trace[-1]["workers"][name]["raw_output"],
+                        branch_task.get("gold_evidence_page_sets", []),
+                    )
+                    for name in recipients
+                },
+                actions=[
+                    step["decision"]["processed_action"]
+                    for step in mas.execution_trace
+                ],
+                trace=mas.execution_trace,
+                decision_evidence_metric=decision_evidence_metric,
+                decision_evidence_f1=decision_evidence_metric["f1"],
+            )
+        return outcome, calls, hits
+    finally:
+        client.close()
 
 
 def main(argv: Sequence[str] | None = None) -> Path:
-    global _ACTIVE_PROGRESS_PATH, _ACTIVE_PROGRESS
     args = parse_args(argv)
+    with RetrievalSession(args, client_factory=SeededCachedChat, memory_factory=GMemory,
+            config_factory=memory_config, embedding_factory=EmbeddingFunc) as retrieval_session:
+        return _collect(args, retrieval_session)
+
+
+def _collect(args: argparse.Namespace, retrieval_session: RetrievalSession) -> Path:
+    global _ACTIVE_PROGRESS_PATH, _ACTIVE_PROGRESS
     _validate_args(args)
     args.test = args.test.resolve()
     args.memory_dir = args.memory_dir.resolve()
@@ -653,6 +660,9 @@ def main(argv: Sequence[str] | None = None) -> Path:
         shutil.copy2(args.cache_seed_from, cache_path)
     design_hash, run_hash = _stable_hash(design), _stable_hash(run)
     total_calls = total_hits = 0
+    executed_branches = shared_use_all_branches = 0
+    timing = {"retrieval": 0.0, "branch_execution": 0.0, "use_all_reuse": 0.0}
+    branch_index = BranchIndex(existing)
     exclusions: list[dict[str, Any]] = []
     conditions = _conditions(
         isolated_recipients, gate_training_only=args.gate_training_only
@@ -697,14 +707,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
         }
         completed_specs: set[tuple[str, int]] = set()
         for kind, candidate_index in candidate_specs:
-            observed = {
-                (key[2], key[3])
-                for key, row in existing.items()
-                if key[0] == claim_id
-                and str(row.get("candidate", {}).get("kind")) == kind
-                and int(row.get("candidate", {}).get("index", -1))
-                == candidate_index
-            }
+            observed = branch_index.observed(claim_id, kind, candidate_index)
             if observed == expected_for_candidate:
                 completed_specs.add((kind, candidate_index))
         if len(completed_specs) == len(candidate_specs):
@@ -716,38 +719,13 @@ def main(argv: Sequence[str] | None = None) -> Path:
         _update_progress(
             current={"claim_id": claim_id, "phase": "retrieval"},
         )
-        retrieval_client = SeededCachedChat(
-            args.model,
-            cache_path,
-            experiment_seed=args.selection_seed,
-            api_base=args.endpoint,
-            api_key=args.api_key,
-        )
-        live_memory = GMemory(
-            namespace=args.memory_dir.name,
-            global_config=memory_config(args.memory_dir),
-            llm_model=retrieval_client,
-            embedding_func=EmbeddingFunc(args.embedding_model),
-        )
-        if live_memory.memory_size != int(snapshot["memory_records"]):
-            retrieval_client.close()
-            raise RuntimeError("frozen GMemory size differs from snapshot manifest")
-        try:
-            frozen = FrozenRetrieval.from_result(
-                live_memory.retrieve_memory(
-                    query_task=task["task_main"],
-                    successful_topk=args.successful_topk,
-                    failed_topk=args.failed_topk,
-                    insight_topk=args.insights_topk,
-                    threshold=args.threshold,
-                )
-            )
-        except BaseException:
-            retrieval_client.close()
-            raise
-        total_calls += retrieval_client.calls
-        total_hits += retrieval_client.cache_hits
-        retrieval_client.close()
+        started = time.perf_counter()
+        frozen, calls, hits = retrieval_session.retrieve(
+            query_task=task["task_main"], cache_path=cache_path,
+            memory_records=int(snapshot["memory_records"]))
+        timing["retrieval"] += time.perf_counter() - started
+        total_calls += calls
+        total_hits += hits
         retrieval_sizes = {
             "successful_trajectories": len(frozen.successful),
             "failed_trajectories": len(frozen.failed),
@@ -760,6 +738,14 @@ def main(argv: Sequence[str] | None = None) -> Path:
                 if args.all_candidates:
                     payload["candidate_id"] += f"-rank{index + 1}"
                 logged_candidate_set.append(payload)
+
+        # The final USE ALL prompt is independent of which candidate will be
+        # masked in its paired DROP. Full causal probes are left unchanged.
+        shared_use = SharedUseAll(branch_index.by_task.get(claim_id, ()),
+            run_hash=run_hash, task=task, candidate_set=logged_candidate_set,
+            retrieval_sizes=retrieval_sizes, exposure_count=len(all_recipients) + 1,
+            seed_base=args.sample_seed_base, repeats=args.repeats
+        ) if args.gate_training_only else None
 
         for candidate_kind, candidate_index in candidate_specs:
             try:
@@ -807,10 +793,9 @@ def main(argv: Sequence[str] | None = None) -> Path:
                 continue
 
             completed_for_candidate = {
-                (key[2], key[3])
-                for key in existing
-                if key[0] == claim_id
-                and key[1] == str(candidate["candidate_id"])
+                (repeat, condition)
+                for repeat in range(args.repeats) for condition in conditions
+                if (claim_id, str(candidate["candidate_id"]), repeat, condition) in existing
             }
             if completed_for_candidate == expected_for_candidate:
                 continue
@@ -841,17 +826,24 @@ def main(argv: Sequence[str] | None = None) -> Path:
                             "phase": "inference",
                         }
                     )
-                    outcome, calls, hits = _run_branch(
-                        args,
-                        task,
-                        frozen,
-                        condition,
-                        all_recipients,
-                        sample_seed,
-                        cache_path,
-                        candidate_kind=candidate_kind,
-                        candidate_index=candidate_index,
-                    )
+                    started = time.perf_counter()
+                    shared = shared_use.get(repeat_index, sample_seed) if (
+                        shared_use is not None and condition == "use_all") else None
+                    if shared is None:
+                        outcome, calls, hits = _run_branch(
+                            args, task, frozen, condition, all_recipients, sample_seed,
+                            cache_path, candidate_kind=candidate_kind,
+                            candidate_index=candidate_index,
+                            memory_records=int(snapshot["memory_records"]))
+                        execution = {"mode": "executed"}
+                        executed_branches += 1
+                        timing["branch_execution"] += time.perf_counter() - started
+                    else:
+                        outcome, execution = shared
+                        calls = hits = 0
+                        shared_use_all_branches += 1
+                        timing["use_all_reuse"] += time.perf_counter() - started
+                    execution["elapsed_seconds"] = time.perf_counter() - started
                     total_calls += calls
                     total_hits += hits
                     row = {
@@ -892,11 +884,15 @@ def main(argv: Sequence[str] | None = None) -> Path:
                         "outcome": outcome,
                         "llm_calls": calls,
                         "cache_hits": hits,
+                        "execution": execution,
                     }
                     with rows_path.open("a", encoding="utf-8") as handle:
                         handle.write(json.dumps(row, ensure_ascii=False) + "\n")
                         handle.flush()
                     existing[key] = row
+                    branch_index.add(key, row)
+                    if shared_use is not None and condition == "use_all":
+                        shared_use.remember(row)
                     resolved_branches += 1
                     progress.update(1)
                     _update_progress(
@@ -913,6 +909,9 @@ def main(argv: Sequence[str] | None = None) -> Path:
                         },
                         llm_calls_this_process=total_calls,
                         cache_hits_this_process=total_hits,
+                        executed_branches_this_process=executed_branches,
+                        shared_use_all_branches_this_process=shared_use_all_branches,
+                        timing_seconds_this_process=timing,
                     )
 
     progress.close()
@@ -927,6 +926,11 @@ def main(argv: Sequence[str] | None = None) -> Path:
         "conditions_per_event": len(conditions),
         "llm_calls_this_process": total_calls,
         "cache_hits_this_process": total_hits,
+        "execution_optimization": "frozen-branch-shared-use-all-v1",
+        "retrieval_runtime_this_process": retrieval_session.stats,
+        "executed_branches_this_process": executed_branches,
+        "shared_use_all_branches_this_process": shared_use_all_branches,
+        "timing_seconds_this_process": timing,
     }
     (args.output_dir / "collection_diagnostics.json").write_text(
         json.dumps(diagnostics, ensure_ascii=False, indent=2), encoding="utf-8"

@@ -361,6 +361,7 @@ def _require_fields(name: str, actual: Mapping[str, Any], expected: Mapping[str,
 def _checkpoint_complete(
     args: argparse.Namespace, *, benchmark: str = "HotpotQA_distractor_offline",
     metric: str = "team_score",
+    sources: Sequence[Path] | None = None,
 ) -> bool:
     payload = _load_json(args.checkpoint)
     if not args.checkpoint.exists():
@@ -390,8 +391,9 @@ def _checkpoint_complete(
     snapshot = _load_json(args.memory_dir / "causal_snapshot_manifest.json")
     if snapshot is None:
         raise RuntimeError("checkpoint exists without its snapshot")
-    sources = [str(args.diagnostic_results / f"seed{seed}{suffix}" / "branches.jsonl")
-               for seed, suffix in ((args.sample_seed_base, ""), (args.retest_seed_base, "_retest"))]
+    sources = [str(path) for path in sources] if sources is not None else [
+        str(args.diagnostic_results / f"seed{seed}{suffix}" / "branches.jsonl")
+        for seed, suffix in ((args.sample_seed_base, ""), (args.retest_seed_base, "_retest"))]
     _require_fields("checkpoint metadata", metadata, {
         "metric": metric, "training_sources": sources,
         "training_source_sha256": {source: file_sha256(Path(source)) for source in sources},
@@ -619,12 +621,13 @@ def _diagnostic_command(args: argparse.Namespace) -> list[str]:
     return command
 
 
-def _train_command(args: argparse.Namespace, *, metric: str = "team_score") -> list[str]:
+def _train_command(args: argparse.Namespace, *, metric: str = "team_score",
+                   sources: Sequence[Path] | None = None) -> list[str]:
     seed0 = args.diagnostic_results / f"seed{args.sample_seed_base}" / "branches.jsonl"
     retest = args.diagnostic_results / f"seed{args.retest_seed_base}_retest" / "branches.jsonl"
     return [
         sys.executable, "-u", "-m", "causal_memory_control.train_gate",
-        "--input", str(seed0), str(retest), "--metric", metric,
+        "--input", *(str(path) for path in (sources if sources is not None else (seed0, retest))), "--metric", metric,
         "--output", str(args.checkpoint),
         "--memory-dir", str(args.memory_dir),
         "--feature-version", str(args.feature_version), "--estimator", args.estimator,

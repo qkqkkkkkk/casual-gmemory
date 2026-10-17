@@ -187,6 +187,10 @@ class GMemoryExposureGate:
             from .neural_estimator import MLPUtilityEstimator
 
             estimator = MLPUtilityEstimator.from_dict(payload["estimator"])
+        elif payload["estimator"].get("schema") == "st-direct-utility-estimator-v1":
+            from .st_estimator import STUtilityEstimator
+
+            estimator = STUtilityEstimator.from_dict(payload["estimator"])
         else:
             estimator = AmortizedUtilityEstimator.from_dict(payload["estimator"])
         if feature_version == 3:
