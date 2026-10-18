@@ -2,11 +2,13 @@
 
 Never invokes another gate, the matrix runner or the seven-policy runner.
 Missing diagnostics/baseline require explicit --prepare-missing authorization.
+The --seed0-only extension never collects data or runs a missing baseline.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import json
 import sys
@@ -37,6 +39,12 @@ def parse_args(argv=None):
     parser.add_argument("--output-dir", type=Path,
         default=Path("causal_memory_control/results/st_gate_benchmark_v1"))
     parser.add_argument("--datasets", default="fever,hotpotqa")
+    parser.add_argument("--seed0-only", action="store_true",
+        help="Reuse only the completed first collection group; never collect data or run a missing baseline")
+    parser.add_argument("--seed0-results-root", type=Path,
+        help="Existing run_seed0_gate_matrix root: reuse its selected baseline/cache and audited old scores")
+    parser.add_argument("--evaluation-endpoint",
+        help="Seed0-only: send new ST evaluations to a verified Ollama replica; preserve source data and baseline")
     parser.add_argument("--fever-data", type=Path, default=Path("data/fever/fever_dev.jsonl"))
     parser.add_argument("--hotpotqa-data", type=Path, default=Path("data/hotpotqa/raw/hotpot_dev_distractor_v1.json"))
     parser.add_argument("--prepare-missing", action="store_true",
@@ -50,6 +58,16 @@ def parse_args(argv=None):
     args.datasets = list(dict.fromkeys(v.strip() for v in args.datasets.split(",") if v.strip()))
     if not args.datasets or set(args.datasets) - {"fever", "hotpotqa"}:
         parser.error("--datasets must select fever,hotpotqa")
+    if args.seed0_only and args.prepare_missing:
+        parser.error("--seed0-only cannot use --prepare-missing; existing data and baseline are required")
+    if args.seed0_results_root is not None and not args.seed0_only:
+        parser.error("--seed0-results-root requires --seed0-only")
+    if args.evaluation_endpoint is not None:
+        from .evaluation_replicas import validate_endpoint
+
+        if not args.seed0_only:
+            parser.error("--evaluation-endpoint requires --seed0-only")
+        args.evaluation_endpoint = validate_endpoint(args.evaluation_endpoint)
     forbidden = {"--arms", "--matrix-dir", "--memory-dir", "--diagnostic-results", "--data", "--checkpoint",
                  "--estimator", "--feature-version", "--use-all-data", "--evaluation-count"}
     if any(v.split("=", 1)[0] in forbidden for v in shared):
@@ -58,6 +76,13 @@ def parse_args(argv=None):
     if (args.output_dir == args.source_root or args.source_root in args.output_dir.parents
             or args.output_dir in args.source_root.parents):
         parser.error("use separate, non-nested source and ST output directories")
+    if args.seed0_only and not (args.source_root / "benchmark_manifest.json").is_file():
+        parser.error("--seed0-only requires the original full-run benchmark_manifest.json")
+    if args.seed0_results_root is not None:
+        args.seed0_results_root = args.seed0_results_root.resolve()
+        if (args.output_dir == args.seed0_results_root or args.seed0_results_root in args.output_dir.parents
+                or args.output_dir in args.seed0_results_root.parents):
+            parser.error("ST output must be separate from the read-only seed0 results root")
     args.shared_argv = shared
     STUtilityEstimator(**st_settings(args), ensemble_size=args.ensemble_size, seed=args.seed, l2=args.l2)
     return args
@@ -66,6 +91,39 @@ def parse_args(argv=None):
 def prepare_dataset(suite, name):
     """Import recorded full-run settings; never silently substitute CLI defaults."""
     adapter, args = import_source_dataset(suite, name)
+    if suite.seed0_only:
+        args.st_seed0_only = True
+    if suite.seed0_results_root is not None:
+        # Do not assume the baseline lives in the original full-run directory:
+        # the seed0 matrix may have run it in its own independent output root.
+        from .run_seed0_gate_matrix import SCHEMA as SEED0_SCHEMA
+
+        manifest = base._load_json(suite.seed0_results_root / "seed0_manifest.json")
+        if (not manifest or manifest.get("schema") != SEED0_SCHEMA
+                or manifest.get("source_root") != str(suite.source_root)
+                or name not in manifest.get("experiments", {})):
+            raise ValueError("seed0 results must register this dataset and the same original --source-root")
+        recorded = manifest["experiments"][name]
+        configuration = adapter.configuration(args)
+        keys = ("data", "memory_dir", "diagnostic_results", "source_md5", "endpoint", "model",
+            "training_claims", "final_claims", "evaluation_count", "sample_seed_base", "repeats",
+            "selection_seed", "temperature", "gate_evaluation_seed", "node_num", "graph_type",
+            "successful_topk", "failed_topk", "insights_topk", "threshold", "embedding_model",
+            "calibration_fraction", "kappa_grid", "delta")
+        base._require_fields("seed0 comparison protocol", recorded, {key: configuration[key] for key in keys})
+        if recorded.get("diagnostic_task_limit", args.training_claims) != args.training_claims:
+            raise ValueError("seed0 results used a diagnostic subset; this comparison requires the full first group")
+        args.st_results_dir = suite.seed0_results_root / name
+        selection = base._load_json(args.st_results_dir / "baseline_selection.json")
+        if not selection or not selection.get("path"):
+            raise FileNotFoundError(f"seed0 baseline_selection.json is required: {args.st_results_dir}")
+        selected = Path(selection["path"]).resolve()
+        if selected not in (args.output_dir / "native_gmemory", args.st_results_dir / "native_gmemory"):
+            raise ValueError("seed0 baseline selection points outside its registered source/result directories")
+        args.st_baseline_dir = selected
+    if suite.evaluation_endpoint is not None and suite.evaluation_endpoint != args.endpoint:
+        args.st_evaluation_endpoint = suite.evaluation_endpoint
+        args.st_replica_manifest = suite.output_dir / name / "evaluation_replicas.json"
     args.checkpoint = suite.output_dir / name / "checkpoint.json"
     args.semantic_cache = suite.output_dir / name / "semantic_cache.sqlite"
     # This is a training-method comparison. Keep deployment policy calibrated,
@@ -75,8 +133,54 @@ def prepare_dataset(suite, name):
 
 
 def training_sources(args):
+    groups = [(args.sample_seed_base, "")]
+    if not getattr(args, "st_seed0_only", False):
+        groups.append((args.retest_seed_base, "_retest"))
     return [args.diagnostic_results / f"seed{seed}{suffix}" / "branches.jsonl"
-            for seed, suffix in ((args.sample_seed_base, ""), (args.retest_seed_base, "_retest"))]
+            for seed, suffix in groups]
+
+
+def baseline_dir(args):
+    return getattr(args, "st_baseline_dir", args.output_dir / "native_gmemory")
+
+
+def diagnostics_ready(adapter, args):
+    if getattr(args, "st_seed0_only", False):
+        from .run_seed0_gate_matrix import validate_seed0
+
+        validate_seed0(adapter, args)
+        return True
+    return adapter.diagnostic_complete(args)
+
+
+def evaluation_command(adapter, args, output):
+    command = adapter.evaluation_command(evaluation_args(args), mode="learned", output=output,
+        resume=(output / "run_manifest.json").is_file())
+    command[command.index("--cache-seed-from") + 1] = str(baseline_dir(args) / "llm_cache.sqlite")
+    return command
+
+
+def evaluation_args(args):
+    child = copy.copy(args)
+    child.endpoint = getattr(args, "st_evaluation_endpoint", args.endpoint)
+    return child
+
+
+def verify_evaluation_replica(args, output):
+    from .evaluation_replicas import build_manifest, validate_manifest
+
+    path = args.st_replica_manifest
+    if path.exists():
+        validate_manifest(path, baseline_dir(args) / "memory_gate.jsonl", source_endpoint=args.endpoint,
+            target_endpoint=args.st_evaluation_endpoint, model=args.model)
+        # Completed evaluations can be audited/reported offline. An unfinished
+        # run must recheck live replicas before making any new model calls.
+        if base._evaluation_complete(output):
+            return
+    full.save_plan(path, build_manifest(baseline_dir(args), source_endpoint=args.endpoint,
+        target_endpoint=args.st_evaluation_endpoint, model=args.model))
+    validate_manifest(path, baseline_dir(args) / "memory_gate.jsonl", source_endpoint=args.endpoint,
+        target_endpoint=args.st_evaluation_endpoint, model=args.model)
 
 
 def train_command(suite, adapter, args):
@@ -99,10 +203,14 @@ def train_command(suite, adapter, args):
 
 def reuse_identity(args):
     paths = [*training_sources(args), args.memory_dir / "causal_snapshot_manifest.json",
-             args.output_dir / "native_gmemory" / "memory_gate.jsonl",
-             args.output_dir / "native_gmemory" / "run_manifest.json",
-             args.output_dir / "native_gmemory" / "llm_cache.sqlite"]
+             baseline_dir(args) / "memory_gate.jsonl",
+             baseline_dir(args) / "run_manifest.json",
+             baseline_dir(args) / "llm_cache.sqlite"]
     paths += [p.parent / "run_manifest.json" for p in training_sources(args)]
+    if hasattr(args, "st_results_dir"):
+        paths += [args.st_results_dir.parent / "seed0_manifest.json", args.st_results_dir / "baseline_selection.json"]
+    if hasattr(args, "st_replica_manifest"):
+        paths.append(args.st_replica_manifest)
     return {str(p): file_sha256(p) for p in paths}
 
 
@@ -144,8 +252,9 @@ def checkpoint_ready(suite, adapter, args):
 
 
 def audited_comparison(args, output):
-    result = compare(args.output_dir / "native_gmemory" / "memory_gate.jsonl", output / "memory_gate.jsonl",
-        bootstrap_samples=args.bootstrap_samples, seed=args.gate_evaluation_seed)
+    result = compare(baseline_dir(args) / "memory_gate.jsonl", output / "memory_gate.jsonl",
+        bootstrap_samples=args.bootstrap_samples, seed=args.gate_evaluation_seed,
+        replica_manifest=getattr(args, "st_replica_manifest", None))
     full._save(output / "comparison.json", result)
     if result["paired_tasks"] != args.final_claims or not result["paired_control_valid"] or not result["policy_valid"]:
         raise ValueError(f"invalid paired control; inspect {output / 'comparison.json'}")
@@ -153,16 +262,25 @@ def audited_comparison(args, output):
 
 
 def write_reports(suite, prepared):
-    policies = [*full.POLICIES, ("semantic_st", "Semantic ST (direct U + InfoNCE)")]
+    policies = list(full.POLICIES)
+    if suite.seed0_only:
+        policies = [(key, label) for key, label in policies
+            if key in {"native_gmemory", "linear", "semantic_linear", "semantic_mlp"}
+            or (key == "always_global_drop" and any(
+                (getattr(args, "st_results_dir", args.output_dir) / key / "comparison.json").is_file()
+                for _, args in prepared.values()))]
+    policies.append(("semantic_st", "Semantic ST (direct U + InfoNCE)"))
     rows, details = [], {}
     for policy, label in policies:
         row = {"Policy": label}
         for name, (adapter, args) in prepared.items():
-            root = suite.output_dir / name / "evaluation" if policy == "semantic_st" else args.output_dir / policy
+            root = (suite.output_dir / name / "evaluation" if policy == "semantic_st" else
+                    baseline_dir(args) if policy == "native_gmemory" else
+                    getattr(args, "st_results_dir", args.output_dir) / policy)
             metric = adapter.metrics[0]
             result = base._load_json(root / ("summary.json" if policy == "native_gmemory" else "comparison.json"))
             if result and policy != "native_gmemory":
-                baseline = args.output_dir / "native_gmemory" / "memory_gate.jsonl"
+                baseline = baseline_dir(args) / "memory_gate.jsonl"
                 gate = root / "memory_gate.jsonl"
                 valid = (result.get("paired_control_valid") and result.get("policy_valid", True)
                     and result.get("paired_tasks") == args.final_claims and gate.is_file() and baseline.is_file()
@@ -175,7 +293,15 @@ def write_reports(suite, prepared):
             if result is not None:
                 details.setdefault(name, {})[policy] = {"reused": policy != "semantic_st", "path": str(root), "result": result}
         rows.append(row)
-    full._save(suite.output_dir / "st_results.json", {"schema": SCHEMA, "notes": NOTE, "rows": rows, "details": details})
+    protocol = {name: {"collection_groups": 1 if suite.seed0_only else 2,
+        "training_sources": [str(p) for p in training_sources(args)],
+        "diagnostic_tasks": args.training_claims, "repeats_per_group": args.repeats,
+        "final_test_offset": args.training_claims, "final_test_tasks": args.final_claims,
+        "baseline": str(baseline_dir(args)), "source_endpoint": args.endpoint,
+        "evaluation_endpoint": evaluation_args(args).endpoint}
+        for name, (_, args) in prepared.items()}
+    full._save(suite.output_dir / "st_results.json", {"schema": SCHEMA, "notes": NOTE,
+        "data_protocol": protocol, "rows": rows, "details": details})
     fields = list(rows[0])
     with (suite.output_dir / "st_results.csv").open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -198,11 +324,22 @@ def main(argv=None):
         "experiments": {name: adapter.configuration(args) for name, (adapter, args) in prepared.items()},
         "semantic": {name: {k: getattr(args, k) for k in ("semantic_model", "semantic_revision", "semantic_chunk_tokens")}
                      for name, (_, args) in prepared.items()}})
+    if suite.seed0_only:
+        config.update(collection_protocol="seed0-only-v1", seed0_results_root=str(suite.seed0_results_root)
+            if suite.seed0_results_root is not None else None)
     plans = {name: {**adapter.plan(args), "new_test_method": "semantic_st", "existing_gates_run": [],
                    "training_sources": [str(p) for p in training_sources(args)],
-                   "baseline": str(args.output_dir / "native_gmemory"),
+                   "baseline": str(baseline_dir(args)),
+                   "evaluation_endpoint": evaluation_args(args).endpoint,
+                   "replica_manifest": str(args.st_replica_manifest) if hasattr(args, "st_replica_manifest") else None,
                    "maximum_new_test_team_inferences": args.final_claims}
              for name, (adapter, args) in prepared.items()}
+    if suite.seed0_only:
+        for name, (_, args) in prepared.items():
+            plans[name].pop("diagnostic_branches_two_seeds", None)
+            plans[name].update(collection_groups=1, new_diagnostic_branches=0,
+                sample_seeds=[args.sample_seed_base + repeat for repeat in range(args.repeats)],
+                reused_results_root=str(suite.seed0_results_root) if suite.seed0_results_root else None)
     print(json.dumps({"schema": SCHEMA, "plan_only": suite.plan_only, "prepare_missing": suite.prepare_missing,
                       "datasets": plans, "notes": NOTE}, ensure_ascii=False, indent=2))
     if suite.plan_only:
@@ -238,22 +375,31 @@ def main(argv=None):
         progress.update(1)
 
     try:
-        with tqdm(total=5 * len(prepared) + 1, desc="Full-data ST only", unit="stage") as progress:
+        with tqdm(total=5 * len(prepared) + 1 + sum(hasattr(args, "st_replica_manifest")
+                  for _, args in prepared.values()), desc="Full-data ST only", unit="stage") as progress:
             for name, (adapter, args) in prepared.items():
                 def require_existing(check, description):
                     if check():
                         return True
                     if not suite.prepare_missing:
+                        if suite.seed0_only:
+                            raise FileNotFoundError(f"{name}: {description} missing/incomplete. "
+                                "Seed0-only never collects data or runs a baseline; check --source-root "
+                                "and --seed0-results-root for the completed original artifacts.")
                         raise FileNotFoundError(f"{name}: {description} missing/incomplete. No other method was run. "
                             "Use the correct --source-root, or --prepare-missing to prepare only diagnostics/baseline.")
                     return False
 
-                stage(name + ":diagnostic", lambda: require_existing(lambda: adapter.diagnostic_complete(args), "full diagnostics"),
-                      command=adapter.diagnostic_command(args))
-                native = args.output_dir / "native_gmemory"
+                stage(name + ":diagnostic", lambda: require_existing(lambda: diagnostics_ready(adapter, args), "full diagnostics"),
+                      command=None if suite.seed0_only else adapter.diagnostic_command(args))
+                native = baseline_dir(args)
                 stage(name + ":baseline", lambda: require_existing(lambda: adapter.evaluation_complete(args, native, mode="always_keep"), "baseline"),
-                      command=adapter.evaluation_command(args, mode="always_keep", output=native,
+                      command=None if suite.seed0_only else adapter.evaluation_command(args, mode="always_keep", output=native,
                           resume=(native / "run_manifest.json").is_file()))
+                output = suite.output_dir / name / "evaluation"
+                if hasattr(args, "st_replica_manifest"):
+                    stage(name + ":verify_evaluation_replica", None,
+                        action=lambda: verify_evaluation_replica(args, output))
                 identity_path = suite.output_dir / name / "reused_inputs.json"
                 full.save_plan(identity_path, reuse_identity(args))
                 stage(name + ":train_st", lambda: checkpoint_ready(suite, adapter, args),
@@ -267,10 +413,9 @@ def main(argv=None):
                     "fit_task_ids": checkpoint["training_metadata"]["fit_task_ids"],
                     "training_task_ids": checkpoint["training_metadata"]["training_task_ids"]})
                 del checkpoint
-                output = suite.output_dir / name / "evaluation"
-                command = adapter.evaluation_command(args, mode="learned", output=output,
-                    resume=(output / "run_manifest.json").is_file())
-                stage(name + ":evaluate_st", lambda: adapter.evaluation_complete(args, output, mode="learned", command=command), command=command)
+                command = evaluation_command(adapter, args, output)
+                stage(name + ":evaluate_st", lambda: adapter.evaluation_complete(
+                    evaluation_args(args), output, mode="learned", command=command), command=command)
                 stage(name + ":compare", None, action=lambda: audited_comparison(args, output))
                 write_reports(suite, prepared)
             stage("reports", None, action=lambda: write_reports(suite, prepared))

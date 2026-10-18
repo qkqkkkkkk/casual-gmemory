@@ -31,6 +31,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--require-no-drop-match", action="store_true")
     parser.add_argument("--require-policy-success",action="store_true")
+    parser.add_argument("--replica-manifest", type=Path, default=None,
+        help="Explicit verified Ollama replica evidence; allows only its recorded endpoint pair")
     return parser.parse_args(argv)
 
 
@@ -86,9 +88,15 @@ def compare(
     *,
     bootstrap_samples: int = 10000,
     seed: int = 42,
+    replica_manifest: Path | None = None,
 ) -> dict[str, Any]:
     if bootstrap_samples < 1:
         raise ValueError("bootstrap_samples must be positive")
+    proof = None
+    if replica_manifest is not None:
+        from .evaluation_replicas import validate_manifest
+
+        proof = validate_manifest(replica_manifest, baseline_path)
     baseline = _load(baseline_path)
     gate = _load(gate_path)
     baseline_ids, gate_ids = set(baseline), set(gate)
@@ -108,6 +116,10 @@ def compare(
         gate_metadata = _semantic_run_metadata(
             gate[task_id].get("run_metadata", {})
         )
+        if proof is not None:
+            from .evaluation_replicas import paired_metadata
+
+            baseline_metadata, gate_metadata = paired_metadata(baseline_metadata, gate_metadata, proof)
         if baseline_metadata != gate_metadata:
             raise ValueError(
                 f"run metadata differs for paired task {task_id}: "
@@ -166,6 +178,12 @@ def compare(
         )},
     }
     result["policy_valid"] = result["jev_errors"]==0
+    if proof is not None:
+        result["evaluation_replica_provenance"] = {
+            "manifest": str(Path(replica_manifest).resolve()),
+            "manifest_sha256": file_sha256(Path(replica_manifest)),
+            "source_endpoint": proof["source_endpoint"], "target_endpoint": proof["target_endpoint"],
+            "replicas": proof["replicas"], "limitation": proof["limitation"]}
     if baseline[task_ids[0]].get("run_metadata", {}).get("benchmark") == "HotpotQA_distractor_offline":
         result.update(
             baseline_answer_f1=result["baseline_mean_reward"],
@@ -187,6 +205,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         args.gate,
         bootstrap_samples=args.bootstrap_samples,
         seed=args.seed,
+        replica_manifest=args.replica_manifest,
     )
     rendered = json.dumps(result, ensure_ascii=False, indent=2)
     if args.output is not None:

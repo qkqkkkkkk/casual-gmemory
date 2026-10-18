@@ -76,6 +76,153 @@ trajectory 和 insight 的所有已检索 rank 都训练、预测，**不是只�
 若任何 κ 都没有正的 dev 平均收益，选择 KEEP ALL（预算为 0）。
 最终测试不会用来调阈值，也不为“产生 DROP”强制改变规则。
 
+## 已完成 FEVER seed0：只追加 ST 训练和测试
+
+如果已经完成全量 FEVER seed0 采集以及 `run_seed0_gate_matrix` 测评，
+无需等待或补采 seed1000。新选项 `--seed0-only` 只读取第一组已有分支；
+`--seed0-results-root` 指向上次 **seed0 测评根目录**，从其
+`fever/baseline_selection.json` 找到真正使用过的 baseline 和回答缓存。
+这两个目录用途不同，不能把原采集目录替换成测评目录。
+
+| 本次步骤 | 数据及行为 |
+| --- | --- |
+| 冻结记忆库 | 只读复用原 FEVER snapshot，不重建 |
+| 训练标签 | 原 5,292 诊断任务 × 6 候选 × 2 repeats；127,008 条配对分支日志 |
+| estimator fit / 开发集 | 同题所有候选一起划分，沿用旧方法的 task split（calibration seed 71） |
+| 新训练 | 仅单输出头 Semantic ST，weighted MSE + 同题表示 InfoNCE |
+| 新评测 | 原独立 1,324 题，仅 ST gate；沿用原 endpoint/model/seed/top-k |
+| 旧方法 | baseline、Linear、Semantic Linear、三头 MLP 仅复用已通过审计的成绩 |
+| 删除策略 | 开发集选 κ，每题最多删 1 条；没有正开发集收益则 KEEP ALL |
+
+上表题数对应默认全量 FEVER 配置，以实际 manifest 为准。seed0 组的两个
+repeat 对应 sample seed 0、1，不是只有一次回答，也不伪装为两组独立采集。
+本选项**不会执行任何采集，也不会补跑缺失的 baseline 或其他旧方法**；
+seed0 缺分支、baseline/cache 缺失或配置不一致会直接报错。不能与
+`--prepare-missing` 同用。未提供 `--seed0-results-root` 时，仅尝试复用
+原 `--source-root/fever/native_gmemory`，不会自动寻找其他目录。
+
+服务器上先检查执行计划（不调用 LLM、不写新结果）：
+
+```bash
+cd /mnt/mydata/hjq/casual-gmemory
+conda activate gmemory
+export OPENAI_API_KEY=ollama
+
+python -u -m causal_memory_control.run_st_gate_benchmark \
+  --source-root causal_memory_control/results/full_gate_benchmark_v1 \
+  --seed0-results-root causal_memory_control/results/fever_seed0_gate_matrix_v1 \
+  --output-dir causal_memory_control/results/fever_seed0_st_gate_v1 \
+  --datasets fever \
+  --seed0-only \
+  --plan-only
+```
+
+若上次 seed0 测评用了不同的目录名，请只替换 `--seed0-results-root`。
+计划应显示 `collection_groups=1`、`new_diagnostic_branches=0`、
+`sample_seeds=[0,1]`，且只有一个 seed0 `branches.jsonl` 输入。
+确认后去掉 `--plan-only` 正式运行；相同命令可断点恢复。
+不会改写源目录或旧 seed0 结果；新的 checkpoint、训练 summary、逐题 gate
+日志、comparison、阶段进度和异常都保存到 `fever_seed0_st_gate_v1`。
+
+主表 `st_results.md/csv/json` 比较 baseline、Linear、Semantic Linear、
+Semantic MLP、Semantic ST；如旧目录已有 Always Global Drop，也只读加入该行。
+旧方法缺少可验证的成绩时显示 `not run / invalid`，绝不自动重跑。
+`st_results.json` 的 `details` 包含 ST 的配对收益、95% CI、DROP 改善/伤害数，
+`data_protocol` 记录单组输入和最终测试边界。`fever/training_summary.json`
+记录每轮 loss、rarity 分布、真实有效对比对数与开发集策略选择。
+
+这次相对当前已同步代码，只需上传以下改动：
+
+```bash
+git add \
+  causal_memory_control/run_st_gate_benchmark.py \
+  causal_memory_control/evaluation_replicas.py \
+  causal_memory_control/compare_gate_runs.py \
+  causal_memory_control/tests/test_st_seed0.py \
+  causal_memory_control/ST_GATE_BENCHMARK.md
+git diff --cached --stat
+git commit -m "Reuse completed seed0 data and evaluations for ST utility gate"
+git push origin main
+```
+
+服务器执行 `git pull --ff-only origin main` 后运行上面的命令。
+这是论文 ST 损失的适配，不是完整 CSM 复现，也不是只改 loss 的严格消融：
+与旧三头 MLP 相比还改变了输出头与训练配置。不能保证一定提升。
+FEVER 约 91.89% 的诊断 U 为零时，对比项尤其依赖少量同题内具有不同 U 的候选；
+需查看 `contrastive_task_groups`/`contrastive_positive_pairs`，若为零，实际只训练加权回归。
+最终测试已被多轮查看，本轮应视为探索性比较；不要根据这次测试表现继续反复调参，
+正式结论宜在新的保留测试集上验证。
+
+### 可选：ST 训练和新答题服务使用 GPU 0
+
+Python 的 `CUDA_VISIBLE_DEVICES` 只约束 Python 本身，不能移动一个已经运行的
+Ollama 服务。要与 GPU 2 的 HotpotQA 服务并行，需单独在 GPU 0 启动 Ollama，
+并使用 `--evaluation-endpoint`。不要重启系统 11434 或已有 11438 服务。
+
+在服务器新终端确认 `ss -ltnp | grep -E ':11440([[:space:]]|$)'` 没有监听输出后：
+
+```bash
+CUDA_VISIBLE_DEVICES=GPU-3529cecd-95a8-0ba6-626f-582dc307e183 \
+OLLAMA_HOST=127.0.0.1:11440 \
+OLLAMA_MODELS=/mnt/mydata/hjq/ollama/models \
+OLLAMA_NUM_PARALLEL=1 \
+/usr/local/bin/ollama serve
+```
+
+该终端保持运行；模型目录直接包含 `blobs/`、`manifests/`，可以与另一个只读推理
+实例共用，但不要在实验期间 pull/rm/create 覆盖模型。GPU 0 并非独占，先确认其
+显存与负载允许。另一个终端用 `OLLAMA_HOST=127.0.0.1:11440 ollama list` 检查模型。
+
+先核对原、新服务的上下文设置；有已加载模型时可查看：
+
+```bash
+curl --fail --silent --show-error http://127.0.0.1:11434/api/ps
+curl --fail --silent --show-error http://127.0.0.1:11440/api/ps
+```
+
+`context_length`（服务版本支持时）和生成设置应一致；`/api/show` 不能证明服务环境
+变量完全相同。不要为了启动新服务而修改原 manifest。新服务若尚未加载模型，可先
+运行一次 `OLLAMA_HOST=127.0.0.1:11440 ollama run qwen2.5:7b '仅回复 OK'`，再检查
+`nvidia-smi -i 0`。本脚本不会替用户启停 Ollama 或选择其 GPU。
+
+正式运行（建议先追加 `--plan-only` 看计划；plan-only 不访问网络）：
+
+```bash
+cd /mnt/mydata/hjq/casual-gmemory
+conda activate gmemory
+export OPENAI_API_KEY=ollama
+
+CUDA_VISIBLE_DEVICES=GPU-3529cecd-95a8-0ba6-626f-582dc307e183 \
+python -u -m causal_memory_control.run_st_gate_benchmark \
+  --source-root causal_memory_control/results/full_gate_benchmark_v1 \
+  --seed0-results-root causal_memory_control/results/fever_seed0_gate_matrix_v1 \
+  --output-dir causal_memory_control/results/fever_seed0_st_gpu0_api11440_v1 \
+  --datasets fever \
+  --seed0-only \
+  --st-device cuda:0 \
+  --evaluation-endpoint http://127.0.0.1:11440/v1
+```
+
+保持新目录，不能把已有 endpoint/设备配置的目录就地改成另一套配置。ST 参数拟合
+使用 GPU 0；当前语义特征编码、checkpoint 加载后的在线 ST gate U 预测默认仍在 CPU。
+答题请求发往 11440，由该服务的 GPU 0 runner 执行。检索、MAS、训练标签、开发集规则
+及原 baseline cache 不变；不会重跑其他方法或重新采集 seed0。
+
+实际运行会在训练前只读探测原、新 endpoint 的 Ollama `/api/tags`、`/api/show` 和
+`/api/version`，核对模型 digest、模板/参数与版本。任一不匹配或服务不可达会停止，
+不绕过检查、不虚构概率/收益。依据保存到 `fever/evaluation_replicas.json`，绑定原
+baseline 日志、manifest、cache 的 SHA256。source 数据始终只读。
+
+原 baseline 日志继续记录 11434，新 ST 日志如实记录 11440。
+配对审计只在显式验证依据下允许这一对 endpoint 不同，其他 metadata、检索指纹、
+无 DROP 输出检查保持严格；未提供验证依据时 `compare_gate_runs` 仍会拒绝端口差异。
+`comparison.json` 保存验证文件指纹和局限性，不能将 metadata 匹配理解成所有随机
+输出或 GPU 数值计算逐位一致。旧 baseline 没有历史模型 digest，现在的探测也不能
+追溯证明其生成时权重未变；应确保原 tag 自 baseline 生成后没有被更新。
+
+未完成评测的恢复会重新核对在线副本；已完成评测可以在服务离线时重新审计/汇总。
+相同命令恢复时不能改变任一副本的模型权重、模板或版本。
+
 ## 服务器：已有全量诊断和 baseline
 
 本次需同步的代码/文档（不包含数据、结果、其他未跟踪改动）：
@@ -85,6 +232,8 @@ git add \
   causal_memory_control/st_estimator.py \
   causal_memory_control/st_data.py \
   causal_memory_control/run_st_gate_benchmark.py \
+  causal_memory_control/evaluation_replicas.py \
+  causal_memory_control/compare_gate_runs.py \
   causal_memory_control/train_gate.py \
   causal_memory_control/runtime_gate.py \
   causal_memory_control/tests/test_st_gate.py \
