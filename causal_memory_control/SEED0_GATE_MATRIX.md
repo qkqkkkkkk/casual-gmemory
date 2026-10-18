@@ -210,6 +210,146 @@ git commit -m "Support diagnostic subsets with unchanged held-out gate evaluatio
 git push origin main
 ```
 
+## 双卡并行：两个 Ollama 副本，各采集 500 题 × 2 repeats
+
+这是**两个独立模型副本并行处理不同任务**，不是把一个模型拆到两张卡上。
+仅采集并行；后续仍在原主 endpoint 上完成原测试集的五项评测。
+先确认第二张 GPU 是你获准使用的资源，停止当前采集控制器后再换新输出目录。
+
+当前服务器诊断：PID 2240063 属于系统用户 `ollama`，父 PID 2442；
+它在 GPU 1 上有主要推理负载，在 GPU 0 上也分配了少量显存。
+PID 1838208 是用户 `hjq` 自己监听 11436 的服务。
+**不要 kill 系统 PID 2442/2240063，也不要为了本实验重启/改动系统 Ollama。**
+下面另建 11438 服务，保留系统服务和已有 11436 服务。
+
+先查询原实验记录的 HotpotQA endpoint：
+
+```bash
+python -c 'import json; from pathlib import Path; p=Path("causal_memory_control/results/full_gate_benchmark_v1/benchmark_manifest.json"); print(json.loads(p.read_text())["experiments"]["hotpotqa"]["endpoint"])'
+```
+
+若打印 `http://127.0.0.1:11434/v1`，下方命令可直接使用。
+若是 11436，则把后面 `--collection-endpoints` 的**第一项**替换为原 11436 endpoint，
+不要修改原 manifest。第一项必须与原 endpoint 一致，最终评测不会改端口。
+
+在另一个终端或 tmux 窗口，确认 11438 未被占用：
+
+```bash
+ss -ltnp | grep -E ':11438([[:space:]]|$)'
+```
+
+没有输出才使用该端口。确认 GPU 2 可用后启动独立副本（GPU UUID 以当前 `nvidia-smi` 为准）：
+
+```bash
+CUDA_VISIBLE_DEVICES=GPU-6b7b35b1-9e70-ae60-f975-4681a64a2bac \
+OLLAMA_HOST=127.0.0.1:11438 \
+OLLAMA_MODELS=/mnt/mydata/hjq/ollama_gpu2_models \
+OLLAMA_NUM_PARALLEL=1 \
+ollama serve
+```
+
+保持服务终端运行。该命令只设置**新启动服务**的 GPU，不会迁移已经运行的系统模型。
+上例显式使用该用户自己的独立模型目录；如果要复用已有模型，可改为你自己的、
+已安装对应权重的用户模型目录。不要让新服务写入、清理系统共享模型目录。
+
+在实验终端检查新服务的模型：
+
+```bash
+OLLAMA_HOST=127.0.0.1:11438 ollama list
+```
+
+必须装有与主服务**同一权重版本**的 `qwen2.5:7b`。如果没有，可在这个新服务上安装：
+
+```bash
+OLLAMA_HOST=127.0.0.1:11438 ollama pull qwen2.5:7b
+```
+
+相同模型名不保证相同权重，尤其是旧模型 tag 已更新时。
+代码在启动采集前调用两个服务的 `/api/tags`、`/api/show`、`/api/version`，
+校验模型 digest、模板/模型配置指纹和 Ollama 版本一致；不匹配或服务不可达会报错，不混用。
+除此以外，两个服务的 context length 等服务级设置也应一致；可查看主服务的
+`/api/ps` 中当前模型的 context_length（若该版本支持），再为新服务配置对应的
+`OLLAMA_CONTEXT_LENGTH`。检查不等于 GPU 绑定验证，也不保证跨硬件 bitwise 一致。
+
+确认服务就绪后，一条命令并行采集，再自动训练/评测：
+
+```bash
+python -u -m causal_memory_control.run_seed0_gate_matrix \
+  --source-root causal_memory_control/results/full_gate_benchmark_v1 \
+  --output-dir causal_memory_control/results/hotpotqa_seed0_train1000_r2_dual_v1 \
+  --datasets hotpotqa \
+  --diagnostic-tasks 1000 \
+  --collection-repeats 2 \
+  --collect-missing \
+  --collection-endpoints http://127.0.0.1:11434/v1,http://127.0.0.1:11438/v1 \
+  --include-always-global-drop
+```
+
+可先在末尾加 `--plan-only` 看分片计划：worker_000 处理原诊断列表索引 0～499，
+worker_001 处理 500～999；每题仍完整执行 6 候选 × 2 repeats × USE/DROP。
+两边合计 **1,000 题、24,000 条逻辑分支**，不是两边各 1,000 题。
+最终测试 offset/count 保持原值。相同题的 USE/DROP 和两个 repeats 都留在同一个 worker，
+避免跨模型进程拼接配对标签。
+
+若要复用刚才**单进程 1,000 题快速模式**已经产生的回答缓存，可在上述正式命令末尾额外添加：
+
+```bash
+--collection-cache-seed-from causal_memory_control/results/hotpotqa_seed0_train1000_r2_v1/artifacts/hotpotqa/diagnostic/seed0/llm_cache.sqlite
+```
+
+只在该文件确实存在且原进程已停止时添加；文件父目录必须有匹配的 run_manifest.json。
+未指定时仍尝试复用原 full-run seed0 cache。两种情况都只复制匹配响应，不改写原分支/缓存。
+旧单进程 manifest 通常未记录权重 digest，因此历史缓存的权重版本仍需你确认未变；
+当前副本一致性检查不能倒推出旧响应生成时的权重版本。若模型 tag 曾更新，
+请在新输出目录命令上加 `--no-collection-cache-seed`，禁止导入旧响应，
+也不要绕过模型副本检查。此选项与 `--collection-cache-seed-from` 互斥。
+
+双卡必须使用新的输出目录；不要直接在已有单卡结果目录加 endpoints 参数。
+每个 worker 的 manifest、原始 run_hash、分支日志、SQLite 都独立保留。
+合并采用**验证后联合读取多个训练源**：完整性、重复任务、漏任务、候选/repeat/seed、
+snapshot/模型等都检查通过后才训练；不会把不同 endpoint 的行伪装成单 endpoint 的新日志。
+每个原始源仍可追溯，最终 checkpoint 记录两个 source 文件及其 SHA256。
+
+```text
+hotpotqa_seed0_train1000_r2_dual_v1/
+  .seed0_parallel.lock
+  artifacts/hotpotqa/diagnostic/
+    parallel_collection_manifest.json       # 模型副本一致性、分片 ID、来源
+    parallel_collection_progress.json       # 两个 PID/进度、退出码、错误日志尾部
+    logs/worker_000.log
+    logs/worker_001.log
+    workers/worker_000/seed0/{branches.jsonl,run_manifest.json,llm_cache.sqlite,...}
+    workers/worker_001/seed0/{branches.jsonl,run_manifest.json,llm_cache.sqlite,...}
+  hotpotqa/{linear,semantic_linear,semantic_mlp,always_global_drop}/
+  seed0_results.{md,json}
+```
+
+控制台显示合计进度条，逐 worker 的详细日志保存在上述独立文件中。
+一个 worker 失败时，控制器会停止**本次启动的另一个采集 worker**，保留两边断点，
+不会停止任何 Ollama 或其他用户的进程。重跑同一命令，已完成 worker 跳过，未完成的继续；
+模型版本或分片配置改变则拒绝继续。输出目录有独占锁，避免两个控制器同时写入。
+训练和最终评测也保持断点续跑。采集的理想耗时可能接近单卡的一半，但共享服务负载、
+GPU 性能、上下文长度、CPU 检索等都会影响提速，不保证整体实验减半。
+
+上传本次双卡相关文件：
+
+```bash
+git add \
+  causal_diagnostic/fever_oracle_recipient/run_experiment.py \
+  causal_diagnostic/hotpotqa_oracle_recipient/run_experiment.py \
+  causal_memory_control/run_seed0_gate_matrix.py \
+  causal_memory_control/parallel_collection.py \
+  causal_memory_control/tests/parallel_worker_fixture.py \
+  causal_memory_control/tests/test_parallel_collection.py \
+  causal_memory_control/SEED0_GATE_MATRIX.md
+git diff --cached --stat
+git commit -m "Add resumable task-sharded collection across Ollama replicas"
+git push origin main
+```
+
+服务器先停止原采集控制器，等进程退出后 `git pull --ff-only origin main`。
+上述部署步骤不会由本地修改代码自动执行；需要在服务器手动启动新服务和实验。
+
 ## 结果、日志与中断恢复
 
 ```text

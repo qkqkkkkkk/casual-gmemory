@@ -117,6 +117,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--test", type=Path, required=True)
     parser.add_argument("--claims", type=int, default=100)
+    parser.add_argument("--evaluation-offset", type=int, default=0,
+        help="Start within the snapshot's registered evaluation IDs (task sharding); default preserves legacy runs")
     parser.add_argument("--memory-dir", type=Path, required=True)
     parser.add_argument("--endpoint", default=None)
     parser.add_argument("--api-key", default=None)
@@ -190,6 +192,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def _validate_args(args: argparse.Namespace) -> None:
     if args.claims < 1:
         raise SystemExit("--claims must be at least 1")
+    if args.evaluation_offset < 0:
+        raise SystemExit("--evaluation-offset must be non-negative")
     if args.repeats < 1:
         raise SystemExit("--repeats must be at least 1")
     if args.candidate_index < 0:
@@ -292,7 +296,7 @@ def _load_snapshot(
             graph_type=args.graph_type,
             node_num=args.node_num,
             embedding_model=args.embedding_model,
-            claims=args.claims,
+            claims=args.claims + getattr(args, "evaluation_offset", 0),
             candidate_kind=validation_kind,
         )
     except SnapshotProvenanceError as exc:
@@ -640,7 +644,9 @@ def _collect(args: argparse.Namespace, retrieval_session: RetrievalSession) -> P
     source_md5 = file_md5(args.test)
     snapshot = _load_snapshot(args, source_md5)
     evaluation = resolve_registered_examples(examples, snapshot["evaluation_ids"])
-    selected = evaluation[: args.claims]
+    selected = evaluation[args.evaluation_offset:args.evaluation_offset + args.claims]
+    if len(selected) != args.claims:
+        raise SystemExit("requested task shard exceeds the snapshot's registered evaluation IDs")
     selected_ids = [int(row["id"]) for row in selected]
     support_ids = {int(value) for value in snapshot["support_ids"]}
     if support_ids & set(selected_ids):
@@ -687,6 +693,8 @@ def _collect(args: argparse.Namespace, retrieval_session: RetrievalSession) -> P
             int(args.label_top_logprobs) if args.label_probabilities else None
         ),
     }
+    if args.evaluation_offset:
+        design["evaluation_offset"] = args.evaluation_offset
     if args.retest_results is not None:
         args.retest_results = args.retest_results.resolve()
         previous_manifest_path = args.retest_results / "run_manifest.json"

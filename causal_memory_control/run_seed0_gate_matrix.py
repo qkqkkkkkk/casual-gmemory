@@ -55,6 +55,13 @@ def parse_args(argv=None):
         help="Repeat count for a new diagnostic subset, e.g. 2; requires --diagnostic-tasks")
     parser.add_argument("--collect-missing", action="store_true",
         help="Explicitly collect/resume only the requested diagnostic subset; never rebuild memory or run seed1000")
+    parser.add_argument("--collection-endpoints",
+        help="Comma-separated Ollama replicas for disjoint task shards; first must match the recorded endpoint; use a new output directory")
+    cache_options = parser.add_mutually_exclusive_group()
+    cache_options.add_argument("--collection-cache-seed-from", type=Path,
+        help="Optional stopped serial collector cache to reuse when switching to a new parallel output; its parent must contain the original run_manifest.json")
+    cache_options.add_argument("--no-collection-cache-seed", action="store_true",
+        help="Do not import legacy collector responses when their model weight version is uncertain")
     parser.add_argument("--include-always-global-drop", action="store_true",
         help="Append a no-retrieved-memory control; safely extends existing four-method output without retraining")
     parser.add_argument("--plan-only", action="store_true")
@@ -66,9 +73,17 @@ def parse_args(argv=None):
         parser.error("--diagnostic-tasks must be at least 5 for task-group fit/dev calibration")
     if args.collection_repeats is not None and args.collection_repeats < 1:
         parser.error("--collection-repeats must be positive")
-    if (args.collect_missing or args.collection_repeats is not None) and args.diagnostic_tasks is None:
+    if (args.collect_missing or args.collection_repeats is not None or args.collection_cache_seed_from is not None
+            or args.no_collection_cache_seed) and args.diagnostic_tasks is None:
         parser.error("--collect-missing/--collection-repeats requires an explicit --diagnostic-tasks subset")
+    if args.collection_endpoints:
+        from .parallel_collection import parse_endpoints
+        args.collection_endpoints = parse_endpoints(args.collection_endpoints)
+        if args.diagnostic_tasks is None or len(args.collection_endpoints) > args.diagnostic_tasks:
+            parser.error("--collection-endpoints requires --diagnostic-tasks >= the number of replicas")
     args.source_root, args.output_dir = args.source_root.resolve(), args.output_dir.resolve()
+    if args.collection_cache_seed_from is not None:
+        args.collection_cache_seed_from = args.collection_cache_seed_from.resolve()
     if (args.source_root == args.output_dir or args.source_root in args.output_dir.parents
             or args.output_dir in args.source_root.parents):
         parser.error("source/output must be separate, non-nested directories")
@@ -93,15 +108,36 @@ def diagnostic_ids(args):
     snapshot = base._load_json(args.memory_dir / "causal_snapshot_manifest.json")
     if snapshot is None:
         raise FileNotFoundError(f"existing frozen snapshot is required: {args.memory_dir}; memory is never rebuilt here")
-    return snapshot["evaluation_ids"][:diagnostic_count(args)]
+    offset = getattr(args, "diagnostic_task_offset", 0)
+    return snapshot["evaluation_ids"][offset:offset + diagnostic_count(args)]
+
+
+def collection_workers(args):
+    endpoints = getattr(args, "collection_endpoints", ())
+    if not endpoints:
+        return [args]
+    from .parallel_collection import shard_ranges
+    workers = []
+    for index, (offset, count) in enumerate(shard_ranges(diagnostic_count(args), len(endpoints))):
+        child = copy.copy(args)
+        child.collection_endpoints = ()
+        child.endpoint = endpoints[index]
+        child.diagnostic_task_limit, child.diagnostic_task_offset = count, offset
+        child.diagnostic_results = args.diagnostic_results / "workers" / f"worker_{index:03d}"
+        workers.append(child)
+    return workers
+
+
+def training_sources(args):
+    return [source_path(child) for child in collection_workers(args)]
 
 
 def collection_complete(args):
-    progress = base._load_json(source_path(args).parent / "collection_progress.json")
-    return bool(progress and progress.get("status") == "completed")
+    return all((base._load_json(source.parent / "collection_progress.json") or {}).get("status") == "completed"
+               for source in training_sources(args))
 
 
-def collection_command(adapter, args, original):
+def collection_command(adapter, args, original, *, verified_replica_cache=False):
     """Collect one matched subset group using the existing optimized collector."""
     output = source_path(args).parent
     command = [sys.executable, "-u", "-m",
@@ -110,6 +146,8 @@ def collection_command(adapter, args, original):
         "--claims", str(diagnostic_count(args)), "--output-dir", str(output),
         "--all-candidates", "--gate-training-only",
         "--isolated-recipients", f"solver_0,solver_{args.node_num - 1}"]
+    if getattr(args, "diagnostic_task_offset", 0):
+        command += ["--evaluation-offset", str(args.diagnostic_task_offset)]
     for name in ("endpoint", "model", "repeats", "sample_seed_base", "selection_seed",
             "temperature", "node_num", "graph_type", "successful_topk", "failed_topk",
             "insights_topk", "threshold", "embedding_model", "bootstrap_samples", "delta"):
@@ -124,18 +162,22 @@ def collection_command(adapter, args, original):
             raise ValueError(f"unreadable subset collection manifest: {manifest_path}")
         seed_cache = manifest["run"].get("cache_seed_from")
         command.append("--resume")
-    else:
-        source = source_path(original)
-        candidate_cache = source.parent / "llm_cache.sqlite"
+    elif not getattr(args, "disable_collection_cache_seed", False):
+        override_cache = getattr(args, "collection_cache_seed_from", None)
+        candidate_cache = override_cache or source_path(original).parent / "llm_cache.sqlite"
+        source = candidate_cache.parent / "branches.jsonl"
+        if override_cache is not None and not candidate_cache.is_file():
+            raise FileNotFoundError(f"requested collection cache is missing: {candidate_cache}")
         if candidate_cache.is_file():
             manifest = base._load_json(source.parent / "run_manifest.json")
             snapshot = base._load_json(args.memory_dir / "causal_snapshot_manifest.json")
             if not manifest or not snapshot:
                 raise ValueError("cannot seed subset cache without the original collection/snapshot manifests")
             base._require_fields("source cache context", manifest["design"], adapter.checkpoint_context(args, snapshot))
-            base._require_fields("source cache run", manifest["run"], {"endpoint": args.endpoint,
+            base._require_fields("source cache run", manifest["run"], {"endpoint": original.endpoint if verified_replica_cache else args.endpoint,
                 "sample_seed_base": args.sample_seed_base})
-            if manifest["design"].get("evaluation_ids", [])[:diagnostic_count(args)] != diagnostic_ids(args):
+            offset = getattr(args, "diagnostic_task_offset", 0)
+            if manifest["design"].get("evaluation_ids", [])[offset:offset + diagnostic_count(args)] != diagnostic_ids(args):
                 raise ValueError("source collection cache belongs to a different diagnostic partition")
             seed_cache = str(candidate_cache)
     if seed_cache:
@@ -174,6 +216,8 @@ def validate_seed0(adapter, args):
             "graph_type", "successful_topk", "failed_topk", "insights_topk", "threshold", "embedding_model", "selection_seed")},
     })
     base._require_fields("seed0 run", run, {"sample_seed_base": args.sample_seed_base, "endpoint": args.endpoint})
+    if design.get("evaluation_offset", 0) != getattr(args, "diagnostic_task_offset", 0):
+        raise ValueError("seed0 task shard offset changed")
     expected = {(int(t), k, i, repeat, condition)
         for t in ids for k, i in specs for repeat in range(args.repeats)
         for condition in ("use_all", "global_drop")}
@@ -218,13 +262,27 @@ def validate_seed0(adapter, args):
         "sample_seeds": [args.sample_seed_base + i for i in range(args.repeats)]}
 
 
+def validate_sources(adapter, args):
+    if not getattr(args, "collection_endpoints", None):
+        return validate_seed0(adapter, args)
+    from .parallel_collection import validate_manifest, validate_union
+    workers = collection_workers(args)
+    reports = [validate_seed0(adapter, child) for child in workers]
+    validate_union([diagnostic_ids(child) for child in workers], diagnostic_ids(args))
+    replica_manifest = args.diagnostic_results / "parallel_collection_manifest.json"
+    validate_manifest(adapter, args)
+    return {"sources": reports, "tasks": sum(r["tasks"] for r in reports),
+        "branches": sum(r["branches"] for r in reports),
+        "replica_manifest_sha256": file_sha256(replica_manifest)}
+
+
 def train_command(adapter, args):
-    return [*base._train_command(args, metric=adapter.training_metric, sources=[source_path(args)]), "--stream-branches"]
+    return [*base._train_command(args, metric=adapter.training_metric, sources=training_sources(args)), "--stream-branches"]
 
 
 def checkpoint_ready(adapter, args):
     if not base._checkpoint_complete(args, benchmark=adapter.benchmark,
-            metric=adapter.training_metric, sources=[source_path(args)],
+            metric=adapter.training_metric, sources=training_sources(args),
             training_task_ids=diagnostic_ids(args)):
         return False
     payload = base._load_json(args.checkpoint)
@@ -271,6 +329,9 @@ def report(root, prepared, baselines, *, include_always_global_drop=False):
         protocols[name] = {"diagnostic_tasks": diagnostic_count(args), "repeats": args.repeats,
             "original_diagnostic_partition_tasks": args.training_claims,
             "final_test_offset": args.training_claims, "final_test_tasks": args.final_claims}
+        if getattr(args, "collection_endpoints", None):
+            protocols[name]["collection_replicas"] = list(args.collection_endpoints)
+            protocols[name]["training_sources"] = [str(p) for p in training_sources(args)]
         baseline = base._load_json(baselines[name] / "summary.json")
         rows = [{"method": "native_gmemory", "tasks": args.final_claims,
             "keep_rate": 1.0, "tasks_with_drop": 0, "drop_improved_tasks": 0, "drop_harmed_tasks": 0}]
@@ -314,6 +375,14 @@ def report(root, prepared, baselines, *, include_always_global_drop=False):
 
 def main(argv=None):
     suite = parse_args(argv)
+    if suite.collection_endpoints and not suite.plan_only:
+        from .parallel_collection import exclusive_run
+        with exclusive_run(suite.output_dir):
+            return _main(suite)
+    return _main(suite)
+
+
+def _main(suite):
     prepared, source_args = {}, {}
     for name in suite.datasets:
         adapter, original = import_source_dataset(suite, name)
@@ -330,10 +399,18 @@ def main(argv=None):
             args.diagnostic_results = suite.output_dir / "artifacts" / name / "diagnostic"
             if suite.collection_repeats is not None:
                 args.repeats = suite.collection_repeats
+        if suite.collection_endpoints:
+            if suite.collection_endpoints[0].rstrip("/") != original.endpoint.rstrip("/"):
+                raise ValueError("first --collection-endpoints entry must match the original endpoint; final evaluation stays there")
+            args.collection_endpoints = suite.collection_endpoints
+        if suite.collection_cache_seed_from is not None:
+            args.collection_cache_seed_from = suite.collection_cache_seed_from
+        if suite.no_collection_cache_seed:
+            args.disable_collection_cache_seed = True
         if suite.include_always_global_drop and args.failed_topk != 0:
             raise ValueError("Always Global Drop requires failed-topk=0 to guarantee no retrieved memory remains")
         prepared[name] = adapter, args
-    plans = {name: {**adapter.plan(args), "training_sources": [str(source_path(args))],
+    plans = {name: {**adapter.plan(args), "training_sources": [str(p) for p in training_sources(args)],
         "new_diagnostic_branches": 0, "collection_groups": 1,
         "sample_seeds": list(range(args.sample_seed_base, args.sample_seed_base + args.repeats)),
         "arms": list(matrix.DEFAULT_ARMS),
@@ -355,6 +432,10 @@ def main(argv=None):
                 maximum_executed_diagnostic_schedules=count * args.repeats * (1 + args.successful_topk + args.insights_topk),
                 collect_missing=suite.collect_missing,
                 final_test_offset=args.training_claims, final_test_questions=args.final_claims)
+        if suite.collection_endpoints:
+            plans[name]["parallel_workers"] = [{"endpoint": child.endpoint,
+                "offset": child.diagnostic_task_offset, "tasks": diagnostic_count(child),
+                "source": str(source_path(child))} for child in collection_workers(args)]
     print(json.dumps({"schema": SCHEMA, "datasets": plans, "notes": NOTE}, ensure_ascii=False, indent=2))
     if suite.plan_only:
         return plans
@@ -366,7 +447,7 @@ def main(argv=None):
     # existing training/evaluation identity unchanged so a completed four-arm
     # run can be extended without modifying or rerunning its fitted models.
     manifest = suite.output_dir / "seed0_manifest.json"
-    if not manifest.exists() and suite.output_dir.exists() and any(suite.output_dir.iterdir()):
+    if not manifest.exists() and suite.output_dir.exists() and any(p.name != ".seed0_parallel.lock" for p in suite.output_dir.iterdir()):
         raise ValueError("nonempty seed0 output has no manifest; use a fresh --output-dir")
     full.save_plan(manifest, config)
     full._save(suite.output_dir / "experiment_plan.json", plans)
@@ -400,10 +481,14 @@ def main(argv=None):
                     # Also validates that a frozen snapshot exists before any
                     # child is launched. It is never silently built/replaced.
                     diagnostic_ids(args)
-                    command = collection_command(adapter, args, source_args[name])
-                    stage(name + ":collect_seed0", lambda: run_if_needed(
-                        lambda: collection_complete(args), command, args), command)
-                stage(name + ":validate_seed0", lambda: full.save_plan(args.output_dir / "reused_inputs.json", validate_seed0(adapter, args)))
+                    if suite.collection_endpoints:
+                        from .parallel_collection import collect_parallel
+                        stage(name + ":collect_seed0", lambda: collect_parallel(adapter, args, source_args[name]))
+                    else:
+                        command = collection_command(adapter, args, source_args[name])
+                        stage(name + ":collect_seed0", lambda: run_if_needed(
+                            lambda: collection_complete(args), command, args), command)
+                stage(name + ":validate_seed0", lambda: full.save_plan(args.output_dir / "reused_inputs.json", validate_sources(adapter, args)))
                 selection = args.output_dir / "baseline_selection.json"
                 saved = base._load_json(selection)
                 if saved:
