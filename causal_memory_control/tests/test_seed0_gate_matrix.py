@@ -61,6 +61,115 @@ def prepare_source(root, dataset):
 
 
 class Seed0MatrixTests(unittest.TestCase):
+    def test_global_drop_extends_completed_runs_without_retraining_and_resumes_per_task(self):
+        for dataset, reuse in (("fever", True), ("hotpotqa", False)):
+            with self.subTest(dataset=dataset), tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+                root = Path(directory)
+                adapter, args = prepare_source(root, dataset)
+                runner = fever_experiment if dataset == "fever" else hotpotqa_experiment
+                if dataset == "fever":
+                    for patch in fever_tests.FeverRunnerTests._patches():
+                        stack.enter_context(patch)
+                    parent = _FeverSTMacNet
+                else:
+                    hotpot_tests.HotpotRunnerTests.patches(stack)
+                    parent = hotpot_tests._HotpotMacNet
+                stack.enter_context(mock.patch.object(runner, "GMemory", _STMemory))
+                stack.enter_context(mock.patch("causal_memory_control.semantic_features.SentenceTransformerEmbedder", return_value=TinyEncoder()))
+                stack.enter_context(redirect_stdout(io.StringIO()))
+                stack.enter_context(redirect_stderr(io.StringIO()))
+                scheduled = []
+                failures = [False]
+
+                class ControlMacNet(parent):
+                    def schedule(self, task):
+                        if self.memory.gate.mode == "planned_drop":
+                            scheduled.append(task["id"])
+                            if failures[0] and len(scheduled) == 2:
+                                failures[0] = False
+                                raise RuntimeError("simulated no-memory model timeout")
+                        return super().schedule(task)
+
+                stack.enter_context(mock.patch.object(runner, "MacNet", ControlMacNet))
+                if reuse:
+                    native = args.output_dir / "native_gmemory"
+                    runner.main(adapter.evaluation_command(args, mode="always_keep", output=native, resume=False)[4:])
+                    cache(native / "llm_cache.sqlite")
+                originals = {p: p.read_bytes() for p in (root / "source").rglob("*") if p.is_file()}
+                commands = []
+
+                def execute(label, command, log, **_):
+                    commands.append((label, command))
+                    if label.endswith(":train"):
+                        train_gate.main(command[4:])
+                    elif label.endswith(":baseline") or label.endswith(":evaluate"):
+                        runner.main(command[4:])
+                        if label.endswith(":baseline"):
+                            cache(Path(command[command.index("--output-dir") + 1]) / "llm_cache.sqlite")
+                    else:
+                        self.fail(f"unexpected collector or method: {label}")
+
+                stack.enter_context(mock.patch.object(seed0.base, "_run_command", side_effect=execute))
+                argv = ["--source-root", str(root / "source"), "--output-dir", str(root / "new"), "--datasets", dataset]
+                seed0.main(argv)
+                unchanged = {p: p.read_bytes() for arm in ("native_gmemory", *seed0.matrix.DEFAULT_ARMS)
+                    for p in (root / "new" / dataset / arm).rglob("*") if p.is_file()}
+                unchanged.update({p: p.read_bytes() for p in (root / "new" / dataset / "checkpoints").glob("*.json")})
+                manifest = (root / "new" / "seed0_manifest.json").read_bytes()
+                commands.clear()
+                extended = [*argv, "--include-always-global-drop"]
+                plan = seed0.main([*extended, "--plan-only"])[dataset]
+                self.assertEqual(plan["controls"], ["always_global_drop"])
+                self.assertEqual(plan["maximum_test_team_inferences"], 5 * args.final_claims)
+                self.assertFalse((root / "new" / dataset / "plans").exists())
+                failures[0] = True
+                with self.assertRaisesRegex(RuntimeError, "no-memory model timeout"):
+                    seed0.main(extended)
+                self.assertEqual([label for label, _ in commands], [dataset + ":always_global_drop:evaluate"])
+                output = root / "new" / dataset / "always_global_drop"
+                prefix = (output / "memory_gate.jsonl").read_bytes()
+                self.assertEqual(len(prefix.splitlines()), 1)
+                progress = seed0.base._load_json(root / "new" / "seed0_progress.json")
+                self.assertEqual(progress["error"]["stage"], dataset + ":always_global_drop:evaluate")
+                self.assertIn("no-memory model timeout", progress["error"]["traceback"])
+                commands.clear()
+                result_path = seed0.main(extended)
+                self.assertEqual([label for label, _ in commands], [dataset + ":always_global_drop:evaluate"])
+                command = commands[0][1]
+                self.assertIn("--resume", command)
+                self.assertEqual(command[command.index("--max-drops") + 1], "-1")
+                self.assertNotIn("--checkpoint", command)
+                self.assertTrue((output / "memory_gate.jsonl").read_bytes().startswith(prefix))
+                rows = [json.loads(line) for line in (output / "memory_gate.jsonl").read_text().splitlines()]
+                self.assertEqual(len(rows), args.final_claims)
+                self.assertEqual(len(scheduled), args.final_claims + 1)
+                for row in rows:
+                    self.assertEqual(row["mode"], "planned_drop")
+                    self.assertEqual(row["dropped_count"], row["retrieved_count"])
+                    self.assertEqual(row["kept_count"], 0)
+                    self.assertEqual({d["memory_type"] for d in row["decisions"]}, {"trajectory", "insight"})
+                    self.assertTrue(all(d["action"] == "drop" for d in row["decisions"]))
+                results = json.loads(result_path.read_text())
+                self.assertEqual([row["method"] for row in results["results"][dataset]],
+                    ["native_gmemory", *seed0.matrix.DEFAULT_ARMS, "always_global_drop"])
+                self.assertTrue(results["details"][dataset]["always_global_drop"]["paired_control_valid"])
+                self.assertEqual(results["results"][dataset][-1]["keep_rate"], 0)
+                self.assertIn("always_global_drop", (output.parent / "matrix_results.csv").read_text())
+                self.assertEqual((root / "new" / "seed0_manifest.json").read_bytes(), manifest)
+                for p, data in {**originals, **unchanged}.items():
+                    self.assertEqual(p.read_bytes(), data, str(p))
+                commands.clear()
+                seed0.main(extended)
+                self.assertFalse(commands)
+                # Never hide retrieval drift by merely recomputing the report.
+                plan_path = output.parent / "plans" / "always_global_drop.json"
+                payload = json.loads(plan_path.read_text())
+                first = next(iter(payload["tasks"].values()))
+                first["drop_memory_ids"] = first["drop_memory_ids"][:1]
+                plan_path.write_text(json.dumps(payload))
+                with self.assertRaisesRegex(ValueError, "plan changed"):
+                    seed0.main(extended)
+
     def test_plan_and_strict_coverage_reject_partial_duplicates_and_changed_seed(self):
         for dataset in ("fever", "hotpotqa"):
             with self.subTest(dataset=dataset), tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):

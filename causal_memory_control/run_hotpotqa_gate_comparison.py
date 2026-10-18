@@ -362,6 +362,7 @@ def _checkpoint_complete(
     args: argparse.Namespace, *, benchmark: str = "HotpotQA_distractor_offline",
     metric: str = "team_score",
     sources: Sequence[Path] | None = None,
+    training_task_ids: Sequence[int] | None = None,
 ) -> bool:
     payload = _load_json(args.checkpoint)
     if not args.checkpoint.exists():
@@ -397,7 +398,8 @@ def _checkpoint_complete(
     _require_fields("checkpoint metadata", metadata, {
         "metric": metric, "training_sources": sources,
         "training_source_sha256": {source: file_sha256(Path(source)) for source in sources},
-        "training_task_ids": sorted(snapshot["evaluation_ids"][:args.training_claims]),
+        "training_task_ids": sorted(training_task_ids if training_task_ids is not None
+                                    else snapshot["evaluation_ids"][:args.training_claims]),
         "calibration_fraction": args.calibration_fraction,
         "kappa_grid": sorted({float(v) for v in args.kappa_grid.split(",")}),
     })

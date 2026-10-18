@@ -1,7 +1,11 @@
 """Train/evaluate three gates using only a completed first collection group.
 
-Import the original full-run configuration and frozen memory. Never invokes a
-diagnostic collector, seed1000, HotpotQA (unless selected), Jev or ST. Original
+Optionally append an Always Global Drop (all retrieved memory hidden) control,
+including to a previously completed four-method run without retraining it.
+
+Import the original full-run configuration and frozen memory. An explicit
+--diagnostic-tasks subset can collect missing data with --collect-missing.
+Never invokes seed1000, HotpotQA (unless selected), Jev or ST. Original
 source artifacts are read-only; all new checkpoints/results use a separate root.
 """
 
@@ -14,6 +18,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import sys
 import traceback
 
 from tqdm import tqdm
@@ -22,13 +27,18 @@ from . import run_full_gate_benchmark as full
 from . import run_hotpotqa_gate_comparison as base
 from . import run_hotpotqa_gate_matrix as matrix
 from .compare_gate_runs import compare, file_sha256
+from .planned_drop import build_plan
 from .source_run import import_source_dataset
 
 
 SCHEMA = "seed0-only-gate-matrix-v1"
+GLOBAL_DROP = "always_global_drop"
 NOTE = ("One completed collection group only; repeats inside that group remain distinct. "
-        "Same task-disjoint fit/dev/test split and original frozen memory. "
-        "Calibrate DROP on diagnostic dev tasks; max one DROP, KEEP ALL fallback allowed. "
+        "Original frozen memory and held-out test boundary are preserved. "
+        "Optional diagnostic subset changes fitting data only, not test tasks. "
+        "Calibrate learned DROP on diagnostic dev tasks; max one DROP, KEEP ALL fallback allowed. "
+        "Optional Always Global Drop hides ALL retrieved trajectories and insights from all agents; "
+        "task context and fixed few-shots remain available. "
         "FEVER reports binary Accuracy, not evidence-aware FEVER Score; HotpotQA reports Answer F1/EM.")
 
 
@@ -39,11 +49,25 @@ def parse_args(argv=None):
     parser.add_argument("--output-dir", type=Path,
         default=Path("causal_memory_control/results/seed0_gate_matrix_v1"))
     parser.add_argument("--datasets", default="fever")
+    parser.add_argument("--diagnostic-tasks", type=int,
+        help="Use the first N tasks of the original randomized diagnostic partition; keep the original test offset/count")
+    parser.add_argument("--collection-repeats", type=int,
+        help="Repeat count for a new diagnostic subset, e.g. 2; requires --diagnostic-tasks")
+    parser.add_argument("--collect-missing", action="store_true",
+        help="Explicitly collect/resume only the requested diagnostic subset; never rebuild memory or run seed1000")
+    parser.add_argument("--include-always-global-drop", action="store_true",
+        help="Append a no-retrieved-memory control; safely extends existing four-method output without retraining")
     parser.add_argument("--plan-only", action="store_true")
     args = parser.parse_args(argv)
     args.datasets = list(dict.fromkeys(v.strip() for v in args.datasets.split(",") if v.strip()))
     if not args.datasets or set(args.datasets) - {"fever", "hotpotqa"}:
         parser.error("--datasets must select fever,hotpotqa")
+    if args.diagnostic_tasks is not None and args.diagnostic_tasks < 5:
+        parser.error("--diagnostic-tasks must be at least 5 for task-group fit/dev calibration")
+    if args.collection_repeats is not None and args.collection_repeats < 1:
+        parser.error("--collection-repeats must be positive")
+    if (args.collect_missing or args.collection_repeats is not None) and args.diagnostic_tasks is None:
+        parser.error("--collect-missing/--collection-repeats requires an explicit --diagnostic-tasks subset")
     args.source_root, args.output_dir = args.source_root.resolve(), args.output_dir.resolve()
     if (args.source_root == args.output_dir or args.source_root in args.output_dir.parents
             or args.output_dir in args.source_root.parents):
@@ -57,6 +81,66 @@ def parse_args(argv=None):
 
 def source_path(args):
     return args.diagnostic_results / f"seed{args.sample_seed_base}" / "branches.jsonl"
+
+
+def diagnostic_count(args):
+    # args.training_claims remains the ORIGINAL final-test offset. Never replace
+    # it with a smaller training sample count or diagnostic tasks leak into test.
+    return getattr(args, "diagnostic_task_limit", args.training_claims)
+
+
+def diagnostic_ids(args):
+    snapshot = base._load_json(args.memory_dir / "causal_snapshot_manifest.json")
+    if snapshot is None:
+        raise FileNotFoundError(f"existing frozen snapshot is required: {args.memory_dir}; memory is never rebuilt here")
+    return snapshot["evaluation_ids"][:diagnostic_count(args)]
+
+
+def collection_complete(args):
+    progress = base._load_json(source_path(args).parent / "collection_progress.json")
+    return bool(progress and progress.get("status") == "completed")
+
+
+def collection_command(adapter, args, original):
+    """Collect one matched subset group using the existing optimized collector."""
+    output = source_path(args).parent
+    command = [sys.executable, "-u", "-m",
+        f"causal_diagnostic.{adapter.name}_oracle_recipient.run_experiment",
+        "--test", str(args.data), "--memory-dir", str(args.memory_dir),
+        "--claims", str(diagnostic_count(args)), "--output-dir", str(output),
+        "--all-candidates", "--gate-training-only",
+        "--isolated-recipients", f"solver_0,solver_{args.node_num - 1}"]
+    for name in ("endpoint", "model", "repeats", "sample_seed_base", "selection_seed",
+            "temperature", "node_num", "graph_type", "successful_topk", "failed_topk",
+            "insights_topk", "threshold", "embedding_model", "bootstrap_samples", "delta"):
+        command += ["--" + name.replace("_", "-"), str(getattr(args, name))]
+    manifest_path = output / "run_manifest.json"
+    seed_cache = None
+    if manifest_path.is_file():
+        # Keep a resumed collection's original cache provenance, even when no
+        # original full-run cache existed on its first invocation.
+        manifest = base._load_json(manifest_path)
+        if not manifest:
+            raise ValueError(f"unreadable subset collection manifest: {manifest_path}")
+        seed_cache = manifest["run"].get("cache_seed_from")
+        command.append("--resume")
+    else:
+        source = source_path(original)
+        candidate_cache = source.parent / "llm_cache.sqlite"
+        if candidate_cache.is_file():
+            manifest = base._load_json(source.parent / "run_manifest.json")
+            snapshot = base._load_json(args.memory_dir / "causal_snapshot_manifest.json")
+            if not manifest or not snapshot:
+                raise ValueError("cannot seed subset cache without the original collection/snapshot manifests")
+            base._require_fields("source cache context", manifest["design"], adapter.checkpoint_context(args, snapshot))
+            base._require_fields("source cache run", manifest["run"], {"endpoint": args.endpoint,
+                "sample_seed_base": args.sample_seed_base})
+            if manifest["design"].get("evaluation_ids", [])[:diagnostic_count(args)] != diagnostic_ids(args):
+                raise ValueError("source collection cache belongs to a different diagnostic partition")
+            seed_cache = str(candidate_cache)
+    if seed_cache:
+        command += ["--cache-seed-from", str(seed_cache)]
+    return command
 
 
 def stable_hash(value):
@@ -78,7 +162,7 @@ def validate_seed0(adapter, args):
     design, run = manifest["design"], manifest["run"]
     if (stable_hash(design) != manifest["design_hash"] or stable_hash(run) != manifest["run_hash"]):
         raise ValueError("seed0 manifest hash is invalid")
-    ids = snapshot["evaluation_ids"][:args.training_claims]
+    ids = diagnostic_ids(args)
     specs = [(kind, index) for kind, count in (
         ("trajectory", args.successful_topk), ("insight", args.insights_topk)) for index in range(count)]
     base._require_fields("seed0 collection", design, {
@@ -140,7 +224,8 @@ def train_command(adapter, args):
 
 def checkpoint_ready(adapter, args):
     if not base._checkpoint_complete(args, benchmark=adapter.benchmark,
-            metric=adapter.training_metric, sources=[source_path(args)]):
+            metric=adapter.training_metric, sources=[source_path(args)],
+            training_task_ids=diagnostic_ids(args)):
         return False
     payload = base._load_json(args.checkpoint)
     metadata = payload["training_metadata"]
@@ -169,16 +254,30 @@ def audit(adapter, args, output, baseline):
     return result
 
 
-def report(root, prepared, baselines):
-    tables, details = {}, {}
+def global_drop_plan(args):
+    return args.output_dir / "plans" / f"{GLOBAL_DROP}.json"
+
+
+def prepare_global_drop(args, baseline):
+    if args.failed_topk != 0:
+        raise ValueError("Always Global Drop no-memory control requires failed-topk=0; failed trajectories are not gate candidates")
+    full.save_plan(global_drop_plan(args), build_plan(baseline / "memory_gate.jsonl", policy="global_all"))
+
+
+def report(root, prepared, baselines, *, include_always_global_drop=False):
+    tables, details, protocols = {}, {}, {}
     lines = ["# Seed0-only gate results", "", NOTE, ""]
     for name, (adapter, args) in prepared.items():
+        protocols[name] = {"diagnostic_tasks": diagnostic_count(args), "repeats": args.repeats,
+            "original_diagnostic_partition_tasks": args.training_claims,
+            "final_test_offset": args.training_claims, "final_test_tasks": args.final_claims}
         baseline = base._load_json(baselines[name] / "summary.json")
         rows = [{"method": "native_gmemory", "tasks": args.final_claims,
             "keep_rate": 1.0, "tasks_with_drop": 0, "drop_improved_tasks": 0, "drop_harmed_tasks": 0}]
         for metric in adapter.metrics:
             rows[0].update({metric.name: baseline[metric.summary_field], metric.delta_field: 0.0, metric.interval_field: [0.0, 0.0]})
-        for arm in matrix.DEFAULT_ARMS:
+        arms = (*matrix.DEFAULT_ARMS, *((GLOBAL_DROP,) if include_always_global_drop else ()))
+        for arm in arms:
             result = base._load_json(args.output_dir / arm / "comparison.json")
             row = {"method": arm, "tasks": result["paired_tasks"], "keep_rate": result["gate_mean_keep_rate"],
                 **{k: result[k] for k in ("tasks_with_drop", "drop_improved_tasks", "drop_harmed_tasks")}}
@@ -193,7 +292,8 @@ def report(root, prepared, baselines):
             writer = csv.DictWriter(handle, fieldnames=fields)
             writer.writeheader()
             writer.writerows(rows)
-        full._save(args.output_dir / "matrix_results.json", {"dataset": name, "results": rows, "notes": NOTE})
+        full._save(args.output_dir / "matrix_results.json", {"dataset": name, "results": rows, "notes": NOTE,
+            "data_protocol": protocols[name]})
         columns = ["method", *(m.label for m in adapter.metrics), "primary delta (pp)", "95% CI (pp)", "keep rate", "DROP tasks", "improved", "harmed"]
         table = ["| " + " | ".join(columns) + " |", "| " + " | ".join("---" for _ in columns) + " |"]
         primary = adapter.metrics[0]
@@ -204,8 +304,11 @@ def report(root, prepared, baselines):
                 f"{100*row['keep_rate']:.2f}%", *(str(row[k]) for k in ("tasks_with_drop", "drop_improved_tasks", "drop_harmed_tasks"))]
             table.append("| " + " | ".join(cells) + " |")
         (args.output_dir / "matrix_results.md").write_text("\n".join(table) + "\n", encoding="utf-8")
-        lines += [f"## {adapter.display_name}", "", *table, ""]
-    full._save(root / "seed0_results.json", {"schema": SCHEMA, "notes": NOTE, "results": tables, "details": details})
+        lines += [f"## {adapter.display_name}", "",
+            f"Diagnostic: {diagnostic_count(args)} tasks x {args.repeats} repeats; "
+            f"final test: {args.final_claims} tasks (original offset {args.training_claims}).", "", *table, ""]
+    full._save(root / "seed0_results.json", {"schema": SCHEMA, "notes": NOTE, "results": tables,
+        "details": details, "data_protocol": protocols})
     (root / "seed0_results.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -220,20 +323,48 @@ def main(argv=None):
         args.checkpoint = args.output_dir / "unused.json"
         args.semantic_cache = args.output_dir / "semantic_cache.sqlite"
         args.kappa = "auto"
+        if suite.diagnostic_tasks is not None:
+            if suite.diagnostic_tasks > original.training_claims:
+                raise ValueError(f"--diagnostic-tasks exceeds the original {name} diagnostic partition ({original.training_claims})")
+            args.diagnostic_task_limit = suite.diagnostic_tasks
+            args.diagnostic_results = suite.output_dir / "artifacts" / name / "diagnostic"
+            if suite.collection_repeats is not None:
+                args.repeats = suite.collection_repeats
+        if suite.include_always_global_drop and args.failed_topk != 0:
+            raise ValueError("Always Global Drop requires failed-topk=0 to guarantee no retrieved memory remains")
         prepared[name] = adapter, args
     plans = {name: {**adapter.plan(args), "training_sources": [str(source_path(args))],
         "new_diagnostic_branches": 0, "collection_groups": 1,
         "sample_seeds": list(range(args.sample_seed_base, args.sample_seed_base + args.repeats)),
-        "arms": list(matrix.DEFAULT_ARMS), "maximum_test_team_inferences": 4 * args.final_claims}
+        "arms": list(matrix.DEFAULT_ARMS),
+        "controls": [GLOBAL_DROP] if suite.include_always_global_drop else [],
+        "maximum_test_team_inferences": (5 if suite.include_always_global_drop else 4) * args.final_claims}
         for name, (adapter, args) in prepared.items()}
     for plan in plans.values():
         plan.pop("diagnostic_branches_two_seeds", None)
+    for name, (_, args) in prepared.items():
+        if suite.diagnostic_tasks is not None:
+            count = diagnostic_count(args)
+            branches = count * (args.successful_topk + args.insights_topk) * args.repeats * 2
+            plans[name].update(gate_training_questions=count,
+                original_diagnostic_partition_questions=args.training_claims,
+                unused_diagnostic_questions=args.training_claims - count,
+                diagnostic_selection="prefix_of_original_randomized_diagnostic_partition_not_outcome_selected",
+                diagnostic_branches_per_seed=branches,
+                new_diagnostic_branches=branches if suite.collect_missing else 0,
+                maximum_executed_diagnostic_schedules=count * args.repeats * (1 + args.successful_topk + args.insights_topk),
+                collect_missing=suite.collect_missing,
+                final_test_offset=args.training_claims, final_test_questions=args.final_claims)
     print(json.dumps({"schema": SCHEMA, "datasets": plans, "notes": NOTE}, ensure_ascii=False, indent=2))
     if suite.plan_only:
         return plans
     config = full._jsonable({"schema": SCHEMA, "source_root": suite.source_root, "datasets": suite.datasets,
         "experiments": {name: adapter.configuration(args) for name, (adapter, args) in prepared.items()},
         "training_protocol": "single-group-streamed-v1", "arms": matrix.DEFAULT_ARMS})
+    # The optional control has a separate immutable intervention plan containing
+    # its baseline hash, retrieval fingerprints and all DROP IDs. Keep the
+    # existing training/evaluation identity unchanged so a completed four-arm
+    # run can be extended without modifying or rerunning its fitted models.
     manifest = suite.output_dir / "seed0_manifest.json"
     if not manifest.exists() and suite.output_dir.exists() and any(suite.output_dir.iterdir()):
         raise ValueError("nonempty seed0 output has no manifest; use a fresh --output-dir")
@@ -262,8 +393,16 @@ def main(argv=None):
                 raise RuntimeError(f"stage {current_stage} exited with incomplete artifacts")
 
     try:
-        with tqdm(total=11 * len(prepared), desc="Seed0-only gate matrix", unit="stage") as progress:
+        with tqdm(total=((14 if suite.include_always_global_drop else 11) + int(suite.collect_missing)) * len(prepared),
+                  desc="Seed0-only gate matrix", unit="stage") as progress:
             for name, (adapter, args) in prepared.items():
+                if suite.collect_missing:
+                    # Also validates that a frozen snapshot exists before any
+                    # child is launched. It is never silently built/replaced.
+                    diagnostic_ids(args)
+                    command = collection_command(adapter, args, source_args[name])
+                    stage(name + ":collect_seed0", lambda: run_if_needed(
+                        lambda: collection_complete(args), command, args), command)
                 stage(name + ":validate_seed0", lambda: full.save_plan(args.output_dir / "reused_inputs.json", validate_seed0(adapter, args)))
                 selection = args.output_dir / "baseline_selection.json"
                 saved = base._load_json(selection)
@@ -303,8 +442,16 @@ def main(argv=None):
                         "estimator_config": payload["estimator"]["config"],
                         "training_metadata": payload["training_metadata"]})
                     stage(name + ":" + arm + ":compare", lambda: audit(adapter, child, output, baseline))
+                if suite.include_always_global_drop:
+                    stage(name + ":" + GLOBAL_DROP + ":plan", lambda: prepare_global_drop(args, baseline))
+                    output, plan = args.output_dir / GLOBAL_DROP, global_drop_plan(args)
+                    command = full.planned_command(adapter, args, output, plan, baseline / "llm_cache.sqlite")
+                    stage(name + ":" + GLOBAL_DROP + ":evaluate", lambda: run_if_needed(
+                        lambda: full.planned_ready(adapter, args, output, command, plan), command, args), command)
+                    stage(name + ":" + GLOBAL_DROP + ":compare", lambda: audit(adapter, args, output, baseline))
                 # A per-dataset table is available even before the next dataset runs.
-                report(suite.output_dir, {k: prepared[k] for k in baselines}, baselines)
+                report(suite.output_dir, {k: prepared[k] for k in baselines}, baselines,
+                    include_always_global_drop=suite.include_always_global_drop)
         state.update(status="completed", current_stage=None)
         full._save(suite.output_dir / "seed0_progress.json", state)
         print((suite.output_dir / "seed0_results.md").read_text(encoding="utf-8"))
