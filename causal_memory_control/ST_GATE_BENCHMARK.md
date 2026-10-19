@@ -223,6 +223,87 @@ baseline 日志、manifest、cache 的 SHA256。source 数据始终只读。
 未完成评测的恢复会重新核对在线副本；已完成评测可以在服务离线时重新审计/汇总。
 相同命令恢复时不能改变任一副本的模型权重、模板或版本。
 
+## 已完成 HotpotQA 1,000 题 × 2 repeats：复用子集追加 ST
+
+`--seed0-results-root` 也接受已完成的 `run_seed0_gate_matrix` 子集实验。
+程序从其中的 `seed0_manifest.json` 导入真实诊断路径、采样题数、repeats 和
+`collection_endpoints`。双卡采集时，读取两个 worker 的原始 `branches.jsonl`，
+验证分片互斥、完整覆盖和已记录的副本证明；不拼造单服务日志、不再次采集。
+
+| 项目 | 本次设置 |
+| --- | --- |
+| 训练方式 | 单 U 头 ST：rarity 加权 MSE + β InfoNCE |
+| β / estimator seed | **0.01 / 23**，沿用 FEVER 最后测试的候选配置 |
+| 网络 / epochs / lr | 128,64 / 10 / 0.001；12 个 task-bootstrap 成员 |
+| 诊断数据 | 已采集的 1,000 题 × 2 repeats；默认同题分组 800 fit / 200 dev |
+| 划分 seed | 71，与旧 Linear / Semantic Linear / MLP 的 fit/dev 分组相同 |
+| κ / 删除预算 | 在 HotpotQA dev 自动选 κ，最多删 1 条；无正收益可退回 KEEP ALL |
+| 测试集 | 原独立 **1,471 题**，offset **5,883**；不是从 1,000 开始测试 |
+| 其他方法 | baseline、Linear、Semantic Linear、MLP、Always Global Drop 仅复用有效旧结果 |
+
+这是**子集训练 + 原完整测试区评测**，不是全量训练。题数和所有生成/检索配置
+以原 manifest 为准。β 固定为 0.01；κ 需要在 HotpotQA 开发集校准，不能根据最终
+测试结果选择，也不强制沿用 FEVER 恰好选中的 0.5。保持 ST 默认参数不变，其他实验不受影响。
+
+本地上传本次四个改动文件（不要包含旧大型结果或未跟踪的无关文件）：
+
+```bash
+git add \
+  causal_memory_control/run_st_gate_benchmark.py \
+  causal_memory_control/tests/test_st_subset.py \
+  causal_memory_control/ST_GATE_BENCHMARK.md \
+  causal_memory_control/README.md
+git diff --cached --stat
+git commit -m "Reuse HotpotQA subset and sharded diagnostics for ST evaluation"
+git push origin main
+```
+
+服务器先只读查看计划：
+
+```bash
+cd /mnt/mydata/hjq/casual-gmemory
+conda activate gmemory
+git pull --ff-only origin main
+export OPENAI_API_KEY=ollama
+
+python -u -m causal_memory_control.run_st_gate_benchmark \
+  --source-root causal_memory_control/results/full_gate_benchmark_v1 \
+  --seed0-results-root causal_memory_control/results/hotpotqa_seed0_train1000_r2_dual_v1 \
+  --output-dir causal_memory_control/results/hotpotqa_seed0_st_beta001_seed23_v1 \
+  --datasets hotpotqa \
+  --seed0-only \
+  --seed 23 \
+  --ensemble-size 12 \
+  --l2 0.0001 \
+  --st-beta 0.01 \
+  --st-hidden-sizes 128,64 \
+  --st-epochs 10 \
+  --st-learning-rate 0.001 \
+  --st-batch-tasks 16 \
+  --st-temperature 1.0 \
+  --st-device cpu \
+  --plan-only
+```
+
+如之前实际使用串行目录，只替换 `--seed0-results-root` 为
+`causal_memory_control/results/hotpotqa_seed0_train1000_r2_v1`。
+不要把 `--source-root` 改为子集实验目录，也不要覆盖之前 FEVER 的 ST 目录。
+计划应显示 `gate_training_questions=1000`、`new_diagnostic_branches=0`、
+`final_test_offset=5883`、`final_test_questions=1471`、`sample_seeds=[0,1]`；
+双卡输入应有两个 worker 文件，不要求已中断的原 5,883 题全量采集完成。
+
+确认后去掉 `--plan-only` 正式训练和测试。小 MLP 可在 CPU 上训练；如确认某张 GPU
+资源可用，设置 Python 的 `CUDA_VISIBLE_DEVICES` 并改用 `--st-device cuda:0`。
+这**不会移动 Ollama 推理服务**：默认仍用原记录中的 endpoint。若要改用另一已存在的
+同模型服务，显式加 `--evaluation-endpoint http://127.0.0.1:11438/v1`；会先核对副本，
+必须与原 baseline 的生成/上下文设置匹配，不自动启动、重启或停止任何 Ollama 进程。
+
+最终控制台及 `hotpotqa/st_metrics.md/csv/json` 包含所有有效旧方法与 ST 的
+**F1、EM、F1 增益/95% CI、keep rate、DROP 题数、改善/伤害数**。
+`st_results.*` 仍保留跨数据集主指标汇总；旧方法缺失/无效则不伪造、不重跑。
+训练日志、逐题正文/U/σ/动作、回答缓存、进度和配对审计与原 ST 流程相同。
+相同命令可恢复，已完成 checkpoint 不重新训练，旧输入及结果保持只读。
+
 ## 服务器：已有全量诊断和 baseline
 
 本次需同步的代码/文档（不包含数据、结果、其他未跟踪改动）：
@@ -301,6 +382,7 @@ st_gate_benchmark_v1/
   logs/<dataset>_train_st.log          # 原始训练控制台、进度条
   logs/<dataset>_evaluate_st.log       # 测试进度与错误
   <dataset>/
+    st_metrics.md / .csv / .json      # 全指标表：HotpotQA F1/EM、增益/CI、DROP 改善/伤害
     reused_inputs.json                # 两组分支、snapshot、baseline/cache 指纹
     checkpoint.json                  # 模型、标准化、训练上下文及 split
     training_summary.json            # rarity、U 分布、有效对比对、逐成员/epoch loss、dev 策略

@@ -23,8 +23,9 @@ resume behavior and the FEVER/HotpotQA collector scheduling optimizations.
 For the new **ST-only** direct-utility + representation-InfoNCE adaptation of
 *Influence Guided Context Selection* (no E2E), use
 `python -m causal_memory_control.run_st_gate_benchmark`.
-It reuses full-data diagnostics, frozen memory and baseline without rerunning
-other gates. See [ST_GATE_BENCHMARK.md](ST_GATE_BENCHMARK.md) for server commands,
+It reuses full-data diagnostics, or a completed seed0 subset (including task-sharded
+collections), frozen memory and baseline without rerunning other gates. The original
+held-out test boundary is preserved. See [ST_GATE_BENCHMARK.md](ST_GATE_BENCHMARK.md) for server commands,
 the exact paper adaptations, loss, logs and recovery behavior.
 
 FEVER and HotpotQA evaluations clear worker and decision-node buffers before

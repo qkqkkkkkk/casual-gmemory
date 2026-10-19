@@ -2,7 +2,8 @@
 
 Never invokes another gate, the matrix runner or the seven-policy runner.
 Missing diagnostics/baseline require explicit --prepare-missing authorization.
-The --seed0-only extension never collects data or runs a missing baseline.
+The --seed0-only extension reuses registered full/subset/sharded data; it never
+collects data, changes the original test boundary or runs a missing baseline.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ NOTE = ("ST-loss adaptation (paper eqs.6-7), not full CSM reproduction. One dire
         "existing semantic features and USE-minus-DROP reward labels; no E2E/recombination. "
         "FEVER: binary Accuracy, not evidence-aware FEVER Score. HotpotQA: Answer F1/EM. "
         "All valid input samples partition into disjoint support, diagnostic fit/dev and test. "
+        "Registered diagnostic subsets/shards reuse only their sampled tasks; the original test boundary is unchanged. "
         "Learned gate budget <=1, dev may select KEEP ALL. Other results are reused, never rerun.")
 
 
@@ -42,7 +44,7 @@ def parse_args(argv=None):
     parser.add_argument("--seed0-only", action="store_true",
         help="Reuse only the completed first collection group; never collect data or run a missing baseline")
     parser.add_argument("--seed0-results-root", type=Path,
-        help="Existing run_seed0_gate_matrix root: reuse its selected baseline/cache and audited old scores")
+        help="Existing run_seed0_gate_matrix root: reuse its registered diagnostic subset/shards, baseline/cache and audited old scores")
     parser.add_argument("--evaluation-endpoint",
         help="Seed0-only: send new ST evaluations to a verified Ollama replica; preserve source data and baseline")
     parser.add_argument("--fever-data", type=Path, default=Path("data/fever/fever_dev.jsonl"))
@@ -105,14 +107,13 @@ def prepare_dataset(suite, name):
             raise ValueError("seed0 results must register this dataset and the same original --source-root")
         recorded = manifest["experiments"][name]
         configuration = adapter.configuration(args)
-        keys = ("data", "memory_dir", "diagnostic_results", "source_md5", "endpoint", "model",
-            "training_claims", "final_claims", "evaluation_count", "sample_seed_base", "repeats",
+        keys = ("data", "memory_dir", "source_md5", "endpoint", "model",
+            "training_claims", "final_claims", "evaluation_count", "sample_seed_base",
             "selection_seed", "temperature", "gate_evaluation_seed", "node_num", "graph_type",
             "successful_topk", "failed_topk", "insights_topk", "threshold", "embedding_model",
             "calibration_fraction", "kappa_grid", "delta")
         base._require_fields("seed0 comparison protocol", recorded, {key: configuration[key] for key in keys})
-        if recorded.get("diagnostic_task_limit", args.training_claims) != args.training_claims:
-            raise ValueError("seed0 results used a diagnostic subset; this comparison requires the full first group")
+        import_seed0_diagnostics(suite, name, recorded, args)
         args.st_results_dir = suite.seed0_results_root / name
         selection = base._load_json(args.st_results_dir / "baseline_selection.json")
         if not selection or not selection.get("path"):
@@ -132,10 +133,54 @@ def prepare_dataset(suite, name):
     return adapter, args
 
 
+def import_seed0_diagnostics(suite, name, recorded, args):
+    """Reuse only the completed collection registered by the old matrix.
+
+    training_claims stays the original test offset, even when fewer diagnostic
+    tasks were sampled. Never rediscover worker paths or rewrite their hashes.
+    """
+    subset = "diagnostic_task_limit" in recorded
+    count = recorded.get("diagnostic_task_limit", args.training_claims)
+    if type(count) is not int or not 5 <= count <= args.training_claims:
+        raise ValueError("invalid registered seed0 diagnostic task count")
+    if recorded.get("diagnostic_task_offset", 0) != 0:
+        raise ValueError("seed0 diagnostic subset must start at the original diagnostic prefix")
+    expected_root = (suite.seed0_results_root / "artifacts" / name / "diagnostic"
+                     if subset else args.diagnostic_results)
+    base._require_fields("seed0 diagnostic location", recorded,
+        {"diagnostic_results": str(expected_root)})
+    if subset:
+        repeats = recorded.get("repeats")
+        if type(repeats) is not int or repeats < 1:
+            raise ValueError("invalid registered seed0 repeat count")
+        args.diagnostic_task_limit = count
+        args.diagnostic_results = expected_root
+        args.repeats = repeats
+    else:
+        base._require_fields("seed0 comparison protocol", recorded, {"repeats": args.repeats})
+    endpoints = recorded.get("collection_endpoints")
+    if endpoints:
+        from .parallel_collection import parse_endpoints
+
+        if not subset or not isinstance(endpoints, list):
+            raise ValueError("parallel seed0 collection requires a registered diagnostic subset")
+        parsed = parse_endpoints(",".join(endpoints))
+        if len(parsed) > count or parsed[0] != args.endpoint.rstrip("/"):
+            raise ValueError("registered collection endpoints do not match the original source")
+        args.collection_endpoints = parsed
+
+
+def diagnostic_count(args):
+    return getattr(args, "diagnostic_task_limit", args.training_claims)
+
+
 def training_sources(args):
+    if getattr(args, "st_seed0_only", False):
+        from .run_seed0_gate_matrix import training_sources as seed0_sources
+
+        return seed0_sources(args)
     groups = [(args.sample_seed_base, "")]
-    if not getattr(args, "st_seed0_only", False):
-        groups.append((args.retest_seed_base, "_retest"))
+    groups.append((args.retest_seed_base, "_retest"))
     return [args.diagnostic_results / f"seed{seed}{suffix}" / "branches.jsonl"
             for seed, suffix in groups]
 
@@ -146,9 +191,9 @@ def baseline_dir(args):
 
 def diagnostics_ready(adapter, args):
     if getattr(args, "st_seed0_only", False):
-        from .run_seed0_gate_matrix import validate_seed0
+        from .run_seed0_gate_matrix import validate_sources
 
-        validate_seed0(adapter, args)
+        validate_sources(adapter, args)
         return True
     return adapter.diagnostic_complete(args)
 
@@ -211,6 +256,8 @@ def reuse_identity(args):
         paths += [args.st_results_dir.parent / "seed0_manifest.json", args.st_results_dir / "baseline_selection.json"]
     if hasattr(args, "st_replica_manifest"):
         paths.append(args.st_replica_manifest)
+    if getattr(args, "collection_endpoints", None):
+        paths.append(args.diagnostic_results / "parallel_collection_manifest.json")
     return {str(p): file_sha256(p) for p in paths}
 
 
@@ -229,7 +276,7 @@ def checkpoint_ready(suite, adapter, args):
     base._require_fields("ST training", metadata, {
         "metric": adapter.training_metric,
         "training_source_sha256": {str(p): file_sha256(p) for p in sources},
-        "training_task_ids": sorted(snapshot["evaluation_ids"][:args.training_claims]),
+        "training_task_ids": sorted(snapshot["evaluation_ids"][:diagnostic_count(args)]),
         "calibration_fraction": args.calibration_fraction, "calibration_seed": 71,
         "kappa_grid": sorted({float(v) for v in args.kappa_grid.split(",")}),
     })
@@ -295,7 +342,8 @@ def write_reports(suite, prepared):
         rows.append(row)
     protocol = {name: {"collection_groups": 1 if suite.seed0_only else 2,
         "training_sources": [str(p) for p in training_sources(args)],
-        "diagnostic_tasks": args.training_claims, "repeats_per_group": args.repeats,
+        "diagnostic_tasks": diagnostic_count(args), "repeats_per_group": args.repeats,
+        "original_diagnostic_partition_tasks": args.training_claims,
         "final_test_offset": args.training_claims, "final_test_tasks": args.final_claims,
         "baseline": str(baseline_dir(args)), "source_endpoint": args.endpoint,
         "evaluation_endpoint": evaluation_args(args).endpoint}
@@ -312,6 +360,47 @@ def write_reports(suite, prepared):
         lines.append("| " + " | ".join(str(row[k]) if k == "Policy" else
             "not run / invalid" if row[k] is None else f"{row[k]:.2f}%" for k in fields) + " |")
     (suite.output_dir / "st_results.md").write_text("\n".join(lines) + "\n\n" + NOTE + "\n", encoding="utf-8")
+    for name, (adapter, _) in prepared.items():
+        write_dataset_metrics(suite.output_dir / name, adapter, policies, details.get(name, {}))
+
+
+def write_dataset_metrics(root, adapter, policies, details):
+    """Render all task-specific metrics, not just the cross-dataset primary score."""
+    rows = []
+    for method, label in policies:
+        if method not in details:
+            continue
+        entry = details[method]
+        result = entry["result"]
+        baseline = method == "native_gmemory"
+        primary = adapter.metrics[0]
+        row = {"method": method, "Policy": label,
+            **{m.name: result[m.summary_field if baseline else m.gate_field] for m in adapter.metrics},
+            "primary_delta": 0.0 if baseline else result[primary.delta_field],
+            "primary_delta_95ci": [0.0, 0.0] if baseline else result[primary.interval_field],
+            "keep_rate": 1.0 if baseline else result["gate_mean_keep_rate"],
+            "tasks_with_drop": 0 if baseline else result["tasks_with_drop"],
+            "improved": 0 if baseline else result["drop_improved_tasks"],
+            "harmed": 0 if baseline else result["drop_harmed_tasks"], "reused": entry["reused"]}
+        rows.append(row)
+    full._save(root / "st_metrics.json", {"dataset": adapter.name, "results": rows, "notes": NOTE})
+    if not rows:
+        return
+    with (root / "st_metrics.csv").open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    fields = ["Policy", *(m.label for m in adapter.metrics), "primary delta (pp)", "95% CI (pp)",
+              "keep rate", "DROP tasks", "improved", "harmed"]
+    lines = ["| " + " | ".join(fields) + " |", "| " + " | ".join("---" for _ in fields) + " |"]
+    for row in rows:
+        lo, hi = row["primary_delta_95ci"]
+        cells = [row["Policy"], *(f"{100 * row[m.name]:.2f}%" for m in adapter.metrics),
+            f"{100 * row['primary_delta']:+.2f}", f"[{100 * lo:+.2f}, {100 * hi:+.2f}]",
+            f"{100 * row['keep_rate']:.2f}%",
+            *(str(row[k]) for k in ("tasks_with_drop", "improved", "harmed"))]
+        lines.append("| " + " | ".join(cells) + " |")
+    (root / "st_metrics.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main(argv=None):
@@ -340,6 +429,12 @@ def main(argv=None):
             plans[name].update(collection_groups=1, new_diagnostic_branches=0,
                 sample_seeds=[args.sample_seed_base + repeat for repeat in range(args.repeats)],
                 reused_results_root=str(suite.seed0_results_root) if suite.seed0_results_root else None)
+            count = diagnostic_count(args)
+            plans[name].update(gate_training_questions=count,
+                diagnostic_branches_per_seed=count * (args.successful_topk + args.insights_topk) * args.repeats * 2,
+                original_diagnostic_partition_questions=args.training_claims,
+                unused_diagnostic_questions=args.training_claims - count,
+                final_test_offset=args.training_claims)
     print(json.dumps({"schema": SCHEMA, "plan_only": suite.plan_only, "prepare_missing": suite.prepare_missing,
                       "datasets": plans, "notes": NOTE}, ensure_ascii=False, indent=2))
     if suite.plan_only:
@@ -422,6 +517,9 @@ def main(argv=None):
         state.update(status="completed", current_stage=None)
         full._save(suite.output_dir / "st_progress.json", state)
         print((suite.output_dir / "st_results.md").read_text(encoding="utf-8"))
+        for name, (adapter, _) in prepared.items():
+            print(f"\n{adapter.display_name}: all metrics\n")
+            print((suite.output_dir / name / "st_metrics.md").read_text(encoding="utf-8"))
         return suite.output_dir / "st_results.json"
     except BaseException as exc:
         trace = traceback.format_exc()
