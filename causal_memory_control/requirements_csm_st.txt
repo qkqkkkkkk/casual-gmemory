@@ -1,0 +1,7 @@
+# Additional dependencies for the new independent CSM-ST pipeline.
+# Install into the existing GMemory environment, not the system Python.
+torch>=2.6,<3
+transformers>=4.51.3,<5
+sentence-transformers>=3.4,<4
+numpy>=1.26,<3
+tqdm>=4.66,<5
