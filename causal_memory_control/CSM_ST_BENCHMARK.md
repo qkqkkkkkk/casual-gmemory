@@ -162,6 +162,76 @@ old max-one-drop gates are **method-level comparisons**, not architecture-only
 ablations. Different beta/selection/truncation/CE-scale ablations need separate
 directories and dev-based choices before final testing.
 
+## Reevaluate all trained policies without retraining
+
+`run_csm_st_benchmark --stage evaluate` reuses completed evaluations and only
+handles CSM. To make a new evaluation of **all trained policies**, upload the
+independent `run_trained_gate_evaluation.py` entry and use a separate directory:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 \
+python -u -m causal_memory_control.run_trained_gate_evaluation \
+  --trained-root causal_memory_control/results/csm_st_gmemory_v2 \
+  --output-dir causal_memory_control/results/all_trained_gates_retest_v1 \
+  --datasets fever,hotpotqa \
+  --csm-device cuda:0 \
+  --plan-only
+```
+
+Use the actual completed CSM root if its name differs. Remove `--plan-only`
+after checking the checkpoint paths, endpoint, test counts and unavailable
+methods. No CE generator weights are loaded and no fitting/calibration runs.
+The endpoint, temperature, frozen memory and held-out task boundary come from
+the recorded experiment. Existing policy thresholds/budgets remain unchanged.
+The default evaluation seed is the recorded original seed; `--seed N` sets a
+new **evaluation** seed for every policy, without changing the train/dev/test
+split or the fitted models. Use a separate output directory for each seed.
+
+The new Always Use baseline starts with an empty answer cache. Every gate is
+evaluated again, importing only this new baseline cache so identical prompts
+share responses and no-DROP parity remains testable. Old policy evaluations
+and their response caches are not replayed. Repeating a completed command
+reuses this **new** run; interrupted evaluations resume per completed task.
+CUDA visibility applies to Python/CSM, not an already-running Ollama service.
+
+Old ST is included if the input CSM report registers it. If it is absent, it
+is shown as `—`; optionally specify `--fever-old-st-root PATH` and/or
+`--hotpotqa-old-st-root PATH` to load existing old-ST checkpoints. The entry
+never trains a missing model. All three old gates and the new CSM checkpoint
+must exist before any new model calls start. Global Drop is evaluated on both
+datasets even if an old Global Drop row was missing.
+
+For checkpoints saved directly by a dev ablation, use
+`--fever-old-st-checkpoint FILE` / `--hotpotqa-old-st-checkpoint FILE` instead.
+Each dataset accepts either a root or a checkpoint, not both. Direct checkpoint
+selection reads its saved dev-calibrated kappa, delta and zero/one DROP budget;
+it does not copy/move weights, recalibrate, or infer settings from the folder
+name. The plan prints its actual beta, training seed and deployment policy.
+For the registered beta=.01/seed=23 runs:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 \
+python -u -m causal_memory_control.run_trained_gate_evaluation \
+  --trained-root causal_memory_control/results/csm_st_gmemory_v2 \
+  --output-dir causal_memory_control/results/all_trained_gates_with_old_st_retest_v2 \
+  --datasets fever,hotpotqa \
+  --csm-device cuda:0 \
+  --fever-old-st-checkpoint causal_memory_control/results/fever_seed0_st_beta_dev_v1/beta_0.01/checkpoint.json \
+  --hotpotqa-old-st-checkpoint causal_memory_control/results/hotpotqa_seed0_st_beta001_seed23_gpu2_v1/hotpotqa/checkpoint.json \
+  --plan-only
+```
+
+Remove `--plan-only` to evaluate all seven policies. A different explicit
+checkpoint changes the evaluation identity and requires a separate output.
+
+The new output contains `reevaluation_results.md`, `.csv`, `.json`,
+`reevaluation_manifest.json`, `reevaluation_progress.json`,
+`logs/{dataset}_{policy}.log`, and
+`{dataset}/{policy}/{memory_gate.jsonl,summary.json,run_manifest.json,llm_cache.sqlite}`.
+Every non-baseline policy also gets `comparison.json` with deltas, paired
+confidence intervals, drop counts and retrieval/no-DROP checks. Final test
+scores are for reporting; choose hyperparameters on diagnostic dev data.
+
 Do not upload `model/`, `*.sqlite*` or entire CE part directories just to review
 results: they include model weights/caches and can be large. Start with the
 table, manifests, training summary, loss history, dev predictions, final

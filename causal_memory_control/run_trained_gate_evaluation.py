@@ -9,6 +9,7 @@ import argparse
 import copy
 import csv
 import json
+import math
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -52,8 +53,11 @@ def parse_args(argv=None):
     parser.add_argument("--datasets", default="fever,hotpotqa")
     parser.add_argument("--csm-device", default="cuda:0", help="CSM/BERT device; does not move the Ollama service")
     parser.add_argument("--seed", type=int, help="Optional new evaluation seed, applied equally to every policy")
-    parser.add_argument("--fever-old-st-root", type=Path)
-    parser.add_argument("--hotpotqa-old-st-root", type=Path)
+    for dataset in ("fever", "hotpotqa"):
+        old_st = parser.add_mutually_exclusive_group()
+        old_st.add_argument(f"--{dataset}-old-st-root", type=Path)
+        old_st.add_argument(f"--{dataset}-old-st-checkpoint", type=Path,
+                            help="Direct old ST checkpoint, including dev-ablation layouts; use its saved calibrated policy")
     parser.add_argument("--plan-only", action="store_true")
     args = parser.parse_args(argv)
     args.datasets = list(dict.fromkeys(v.strip() for v in args.datasets.split(",") if v.strip()))
@@ -63,6 +67,18 @@ def parse_args(argv=None):
         parser.error("--seed must be nonnegative")
     args.trained_root, args.output_dir = args.trained_root.resolve(), args.output_dir.resolve()
     return args
+
+
+def calibrated_st_policy(args, payload):
+    """Load the saved dev-selected policy; never recalibrate on test outcomes."""
+    policy = payload.get("training_metadata", {}).get("policy_calibration", {})
+    kappa, delta = policy.get("recommended_kappa"), policy.get("delta")
+    budget = policy.get("recommended_max_drops")
+    if (policy.get("enabled") is not True or type(budget) is not int or budget not in (0, 1)
+            or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                   or not math.isfinite(v) or v < 0 for v in (kappa, delta))):
+        raise ValueError(f"old ST checkpoint requires a saved calibrated kappa/delta/budget: {args.checkpoint}")
+    args.kappa, args.delta, args.max_drops = float(kappa), float(delta), budget
 
 
 def prepare(suite):
@@ -101,11 +117,17 @@ def prepare(suite):
                 child.checkpoint, child.kappa, child.max_drops = None, 0.0, -1
             else:
                 old_st = getattr(suite, f"{name}_old_st_root") if method == "semantic_st" else None
+                direct_st = getattr(suite, f"{name}_old_st_checkpoint") if method == "semantic_st" else None
                 previous = (old_st.resolve() / name / "evaluation" if old_st else
                             Path(details[method]["path"]) if method in details else None)
-                if method == "semantic_st" and previous is None:
+                if method == "semantic_st" and previous is None and direct_st is None:
                     continue
-                if method == "csm_st":
+                use_saved_policy = False
+                if direct_st is not None:
+                    child.checkpoint = direct_st.resolve()
+                    roots.add(child.checkpoint.parent)
+                    use_saved_policy = True
+                elif method == "csm_st":
                     child.checkpoint = suite.trained_root / name / "checkpoint.json"
                     child.kappa, child.delta, child.max_drops = 0.0, 0.0, -1
                 else:
@@ -120,10 +142,15 @@ def prepare(suite):
                         child.kappa, child.delta, child.max_drops = run["kappa"], run["delta"], run["max_drops"]
                     elif old_st:
                         child.checkpoint = old_st.resolve() / name / "checkpoint.json"
-                        child.kappa = "auto"
+                        use_saved_policy = True
                     else:
                         raise FileNotFoundError(f"original evaluated policy manifest required: {run_path}")
                 payload = read(child.checkpoint)
+                if method == "semantic_st":
+                    if payload.get("estimator", {}).get("schema") != "st-direct-utility-estimator-v1":
+                        raise ValueError(f"expected an old Semantic ST checkpoint: {child.checkpoint}")
+                    if use_saved_policy:
+                        calibrated_st_policy(child, payload)
                 adapter.validate_checkpoint(payload, child, snapshot)
                 sources.add(child.checkpoint)
                 if method == "csm_st":
@@ -148,6 +175,11 @@ def prepare(suite):
             "checkpoints": {m: str(a.checkpoint) for m, a in methods.items() if a.checkpoint},
             "maximum_team_inferences": len(expected_ids) * len(methods),
             "new_training_runs": 0, "new_ce_forwards": 0, "old_answer_caches_imported": 0}
+        if getattr(suite, f"{name}_old_st_checkpoint") is not None:
+            old_args = methods["semantic_st"]
+            old_config = read(old_args.checkpoint)["estimator"]["config"]
+            plan[name]["old_st_settings"] = {"beta": old_config["beta"], "training_seed": old_config["seed"],
+                "kappa": old_args.kappa, "delta": old_args.delta, "max_drops": old_args.max_drops}
     # Never put a reevaluation inside any of its original result directories.
     for root in roots:
         if suite.output_dir == root or root in suite.output_dir.parents or suite.output_dir in root.parents:
