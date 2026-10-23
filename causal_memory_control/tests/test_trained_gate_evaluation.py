@@ -17,6 +17,7 @@ from causal_memory_control import run_csm_st_benchmark as csm
 from causal_memory_control import run_seed0_gate_matrix as seed0
 from causal_memory_control import run_st_gate_benchmark as st
 from causal_memory_control import run_trained_gate_evaluation as reevaluate
+from causal_memory_control import run_oracle_evaluation as oracle
 from causal_memory_control.csm_st_model import LocalGlobalCSM
 from causal_memory_control.tests.test_csm_st import FakeCE, tiny_components
 from causal_memory_control.tests.test_csm_st_benchmark import options
@@ -173,6 +174,17 @@ class TrainedEvaluationTests(unittest.TestCase):
                     (saved_policy["recommended_kappa"], saved_policy["delta"], saved_policy["recommended_max_drops"]))
                 commands.clear()
                 reevaluate.main(with_st)
+                self.assertEqual(commands, [])
+                oracle_argv = ["--evaluation-root", str(root / "retest_with_st"),
+                               "--output-dir", str(root / "latest_oracle"), "--datasets", dataset]
+                oracle_report = json.loads(oracle.main(oracle_argv).read_text())
+                self.assertEqual(len(commands), 2)
+                self.assertTrue(all("oracle_branches" in command[command.index("--output-dir") + 1]
+                                    for _, command in commands))
+                self.assertTrue(oracle_report["details"][dataset][oracle.ORACLE]["paired_control_valid"])
+                self.assertTrue(all(method in oracle_report["details"][dataset] for method, _ in reevaluate.POLICIES))
+                commands.clear()
+                oracle.main(oracle_argv)
                 self.assertEqual(commands, [])
                 if dataset == "hotpotqa":
                     root_plan = reevaluate.main([*argv, "--output-dir", str(root / "root_plan"),
