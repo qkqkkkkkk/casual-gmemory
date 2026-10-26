@@ -1,4 +1,4 @@
-"""Independent PDDL/ALFWorld eight-policy experiment; no FEVER/HotpotQA runs."""
+"""PDDL/ALFWorld benchmark: eight policies plus optional Local–Global Team U."""
 from __future__ import annotations
 
 import argparse
@@ -10,8 +10,7 @@ import subprocess
 import sys
 
 from .interactive_data import SCHEMA, dependencies, digest, inventory, locked, save, sha, workload
-
-STAGES = ("experts", "support", "collect", "labels", "train_reward", "train_csm", "evaluate", "report")
+from .interactive_protocol import STAGES, policies, stages, training_options
 
 
 def parse_args(argv=None):
@@ -19,7 +18,9 @@ def parse_args(argv=None):
     p.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
     p.add_argument("--output-dir", type=Path, default=Path("causal_memory_control/results/pddl_alfworld_gate_v1"))
     p.add_argument("--datasets", default="pddl,alfworld")
-    p.add_argument("--stage", choices=("all", "smoke", *STAGES), default="all")
+    p.add_argument("--stage", choices=("all", "smoke", *STAGES, "labels_team_u", "train_team_u"), default="all")
+    p.add_argument("--include-local-global-team-u", action="store_true",
+                   help="Add the ninth policy: measured Team U, Local–Global model and post-score semantic dedup")
     p.add_argument("--plan-only", action="store_true")
     p.add_argument("--endpoint", default="http://127.0.0.1:11434/v1")
     p.add_argument("--model", default="qwen2.5:7b")
@@ -58,6 +59,8 @@ def parse_args(argv=None):
         p.error("--random-seeds must be distinct integers")
     if not a.datasets or set(a.datasets) - {"pddl", "alfworld"}:
         p.error("only pddl,alfworld are supported; old datasets cannot be executed here")
+    if a.stage in ("labels_team_u", "train_team_u") and not a.include_local_global_team_u:
+        p.error("Team U stages require --include-local-global-team-u")
     if len(set(a.random_seeds)) != len(a.random_seeds) or len(a.random_seeds) < 2:
         p.error("declare at least two distinct random seeds")
     if (min(a.max_steps, a.repeats, a.alf_support, a.alf_fit, a.alf_dev, a.expert_timeout) < 1
@@ -85,6 +88,7 @@ def configuration(args):
         "causal_memory_control/semantic_features.py", "causal_memory_control/csm_st_model.py",
         "causal_memory_control/csm_st_training.py", "causal_memory_control/csm_st_data.py",
         "causal_memory_control/csm_st_runtime.py", "causal_memory_control/csm_st_scoring.py",
+        "causal_memory_control/local_global_team_u.py", "causal_memory_control/csm_st_worker.py",
         "causal_memory_control/train_gate.py", "causal_memory_control/features.py",
         "causal_memory_control/gmemory_adapter.py", "causal_memory_control/task_state.py",
         "causal_diagnostic/oracle_recipient/seeded_client.py")]
@@ -113,6 +117,16 @@ def configuration(args):
         "reward_gates": "existing_semantic_linear_three_head_MLP_and_direct_U_ST_beta001_seed23",
         "test_tuning": False, "jev": False, "large_model_downloads": False,
         "old_datasets": "FEVER/HotpotQA never executed by this entry point"}
+    if args.include_local_global_team_u:
+        config["protocol"]["local_global_team_u"] = {
+            "label": "mean_success_KEEP_ALL-minus-mean_success_SINGLE_DROP; paired_original_lists",
+            "architecture": "same_CSMConfig_BERT_3_layers_8_heads_unbounded_head",
+            "action": "score_full_list_then_semantic_dedup_keep_iff_predicted_U_gt_0_unlimited_drops",
+            "dedup_threshold": 0.98, "kappa": 0.0, "delta": 0.0, "keep_all_fallback": False,
+            "training_candidate_deduplication": False, "cross_task_recombination": False,
+            "new_label_rollouts": 0, "ce_forwards": 0,
+            "training": training_options(config, team_u=True),
+            "comparison": "matches_QA_Team_U; conditioning_and_reward_scale_adaptations_are_not_a_pure_CE_label_ablation"}
     return config
 
 
@@ -120,7 +134,8 @@ def plan(config, args):
     deps = dependencies()
     return {"schema": config["schema"], "output_dir": config["output_dir"], "stage": args.stage,
         "plan_only": True, "writes_or_model_loads_or_service_calls": 0,
-        "workload": workload(config["experiments"], config["successful_topk"] + config["insights_topk"], config["repeats"]),
+        "workload": workload(config["experiments"], config["successful_topk"] + config["insights_topk"], config["repeats"],
+                             include_team_u=config.get("include_local_global_team_u", False)),
         "smoke_additional_schedules": (2*sum(len(v.get("cv_splits", [None])) for v in config["experiments"].values())
                                        if args.stage == "smoke" else 0),
         "dependencies": deps, "missing_dependencies": [k for k, v in deps.items() if not v],
@@ -131,7 +146,8 @@ def plan(config, args):
             "support successes yield nonempty candidate lists", "full-snapshot retrieval/no-DROP parity"],
         "protocol": config["protocol"], "config_digest_without_service_identity": digest(config),
         "resume": "same configuration resumes task/action files; any split/model/seed/code/checkpoint change rejected",
-        "stages": list(STAGES), "cost_note": "No wall-time promise. Schedules are multi-agent multi-step, not API calls."}
+        "stages": list(stages(config)), "policies": [m for m, _ in policies(config)],
+        "cost_note": "No wall-time promise. Schedules are multi-agent multi-step, not API calls."}
 
 
 def dataset_jobs(config, name):
@@ -171,9 +187,9 @@ def main(argv=None):
         raise ValueError("output directory has unrelated files; select a new independent directory")
     locked(target, config)
     save(args.output_dir / "plan.json", plan(config, args))
-    stages = STAGES if args.stage == "all" else (args.stage,)
+    selected_stages = stages(config) if args.stage == "all" else (args.stage,)
     try:
-        for stage in stages:
+        for stage in selected_stages:
             if stage == "report":
                 from .interactive_report import report
                 report(config)
@@ -192,7 +208,7 @@ def main(argv=None):
                     with (logs / (stage + ".log")).open("a") as stream:
                         subprocess.run(command, check=True, cwd=args.repo, stdout=stream, stderr=subprocess.STDOUT)
                     print(f"completed {label}/{stage}; logs: {logs / (stage + '.log')}", flush=True)
-        save(args.output_dir / "pipeline_progress.json", {"status": "completed", "stages": list(stages)})
+        save(args.output_dir / "pipeline_progress.json", {"status": "completed", "stages": list(selected_stages)})
     except Exception as exc:
         save(args.output_dir / "pipeline_progress.json", {"status": "failed", "stage": stage,
             "error": str(exc), "details": "dataset errors/*.json and logs/<stage>.log"})

@@ -12,6 +12,7 @@ import traceback
 import uuid
 
 from .interactive_data import digest, files_identity, save, sha
+from .interactive_protocol import learned_methods, policies
 
 
 def progress(root, stage, **fields):
@@ -192,8 +193,7 @@ def evaluate(config, name):
 
     root = Path(config["output_dir"]) / name
     memory = snapshot(config, name)
-    checkpoints = {m: sha(root / m / "checkpoint.json") for m in
-                   ("semantic_linear", "semantic_mlp", "semantic_st", "csm_st")}
+    checkpoints = {m: sha(root / m / "checkpoint.json") for m in learned_methods(config)}
     store = ActionStore(root / "evaluation/actions", {"config_digest": digest(config),
         "snapshot_sha256": sha(root / "snapshot.json"), "checkpoints_sha256": checkpoints, "phase": "test"})
     gates = learned_gates(config, name)
@@ -208,6 +208,9 @@ def evaluate(config, name):
                 records = json.loads(part.read_text())
                 if any(r["config_digest"] != digest(config) for r in records):
                     raise ValueError("completed policy configuration changed")
+                expected = {m for m, _ in policies(config)} | {f"random_drop_seed{s}" for s in config["random_seeds"]}
+                if len(records) != len(expected) or {r["policy"] for r in records} != expected:
+                    raise ValueError("completed policy file lacks registered strategy coverage")
                 completed.extend(records)
                 continue
             seed = config["evaluation_seed"]
@@ -302,7 +305,8 @@ def main(argv=None):
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--dataset", choices=("pddl", "alfworld"), required=True)
     parser.add_argument("--stage", choices=("support", "collect", "experts", "expert_one", "labels",
-                                            "train_reward", "train_csm", "evaluate", "smoke"), required=True)
+                                            "train_reward", "train_csm", "labels_team_u", "train_team_u",
+                                            "evaluate", "smoke"), required=True)
     parser.add_argument("--task-id")
     args = parser.parse_args(argv)
     config = json.loads(args.config.read_text())
@@ -310,7 +314,12 @@ def main(argv=None):
     try:
         if args.stage != "expert_one":
             verify_inputs(config, args.dataset)
-        if args.stage in ("labels", "train_reward", "train_csm"):
+        if args.stage in ("labels_team_u", "train_team_u"):
+            if not config.get("include_local_global_team_u"):
+                raise ValueError("Team U is not registered in this experiment")
+            from .interactive_team_u import labels, train
+            {"labels_team_u": labels, "train_team_u": train}[args.stage](config, args.dataset)
+        elif args.stage in ("labels", "train_reward", "train_csm"):
             from .interactive_training import ce_labels, csm_train, reward_train
             {"labels": ce_labels, "train_reward": reward_train, "train_csm": csm_train}[args.stage](config, args.dataset)
         elif args.stage == "expert_one":

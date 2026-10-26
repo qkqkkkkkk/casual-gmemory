@@ -246,7 +246,7 @@ def dependencies():
              "textworld", "gym", "nltk", "chromadb", "openai", "fast_downward")}
 
 
-def workload(experiments, k=6, repeats=2):
+def workload(experiments, k=6, repeats=2, *, include_team_u=False):
     result = {}
     for name, data in experiments.items():
         n = {part: len(ids) for part, ids in data["split"].items()}
@@ -257,10 +257,14 @@ def workload(experiments, k=6, repeats=2):
         result[name] = {"tasks": n, "candidate_cap": k, "diagnostic_repeats": repeats,
             "diagnostic_logical_use_drop_rows": diagnostic * k * repeats * 2,
             "diagnostic_schedules_upper_bound_shared_keep": diagnostic * (k + 1) * repeats,
-            "test_schedules_upper_bound_shared_actions": n["test"] * (k + 3),
+            "test_schedules_upper_bound_shared_actions": n["test"] * (k + 3 + int(include_team_u)),
             "expert_episodes": diagnostic, "ce_original_forwards_upper_bound": diagnostic * (k + 1),
             "ce_augmented_forwards_upper_bound": 2 * n["fit"] * (k + 1),
-            "note": "test actions KEEP + K SINGLE DROP + DROP ALL + at most one new CSM subset; LLM calls exceed schedules"}
+            "note": "test actions KEEP + K SINGLE DROP + DROP ALL + CSM subset"
+                    + (" + Team U subset" if include_team_u else "") + "; LLM calls exceed schedules"}
+        if include_team_u:
+            result[name]["team_u_additional_test_schedules_upper_bound"] = n["test"]
+            result[name]["team_u_new_label_schedules"] = result[name]["team_u_ce_forwards"] = 0
         if "test_cohorts" in data:
             result[name]["test_cohorts"] = {k: len(v) for k, v in data["test_cohorts"].items()}
             result[name]["primary_test_tasks"] = len(data["primary_test_ids"])

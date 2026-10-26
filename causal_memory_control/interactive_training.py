@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .interactive_data import digest, locked, save, sha
 from .interactive_runtime import event_from_row
+from .interactive_protocol import learned_methods, training_options
 
 
 def diagnostic_lists(root, data):
@@ -156,6 +157,10 @@ def ce_labels(config, name):
         spec = {"model": config["embedding_model"], "revision": None, "chunk_tokens": 192, "threshold": 0.98}
         dedup = dedup_identity(encoder, spec)
         locked(target / "dedup_identity.json", dedup)
+        team_identity = root / "local_global_team_u/dedup_identity.json"
+        if config.get("include_local_global_team_u") and team_identity.exists():
+            if json.loads(team_identity.read_text()) != dedup:
+                raise ValueError("CE semantic dedup model differs from the Team U comparison")
         deduplicator = Deduplicator(encoder, 0.98)
         rows = []
         expert_hashes = {}
@@ -235,11 +240,7 @@ def csm_train(config, name):
     dedup = json.loads((root / "dedup_identity.json").read_text())
     if dedup.get("resolved_commit"):
         dedup["revision"] = dedup["resolved_commit"]
-    options = dict(seed=2024, device=config["train_device"], epochs=10, batch_tasks=16,
-        encoder_learning_rate=2e-5, head_learning_rate=1e-4, weight_decay=0.01, beta=0.1,
-        temperature=1.0, positive_epsilon=0.1, negative_epsilon=0.3, rarity_alpha=10.0,
-        trivial_threshold=5.0, hard_threshold=5.0, rarity_bin_width=1.0, trivial_keep_fraction=0.2,
-        local_files_only=True)
+    options = training_options(config)
     rows = read_rows(root / "ce_labels.jsonl") + read_rows(root / "augmented_labels.jsonl")
     train(rows, root, model_config=CSMConfig(encoder=config["encoder_model"]), options=options,
         fit_ids=set(data["split"]["fit"]), dev_ids=set(data["split"]["dev"]),
@@ -264,7 +265,7 @@ def learned_gates(config, name):
     finally:
         encoder.close()
     gates = {}
-    for method in ("semantic_linear", "semantic_mlp", "semantic_st", "csm_st"):
+    for method in learned_methods(config):
         path = root / method / "checkpoint.json"
         payload = json.loads(path.read_text())
         metadata = payload["training_metadata"]
@@ -274,7 +275,19 @@ def learned_gates(config, name):
         if (set(metadata["fit_task_ids"]) != set(data["split"]["fit"])
                 or set(metadata["dev_task_ids"]) != set(data["split"]["dev"])):
             raise ValueError("checkpoint fit/dev partition mismatch")
-        if method == "csm_st":
+        if method == "local_global_team_u":
+            from .local_global_team_u import gate_class, checkpoint_spec, deployment_dedup
+            from .interactive_team_u import validate_labels
+
+            if not validate_labels(config, name):
+                raise ValueError("missing measured Team U labels")
+            _, spec, _ = checkpoint_spec(path)
+            provenance = json.loads((path.parent / "labels_manifest.json").read_text())
+            if spec["dedup"] != deployment_dedup(provenance):
+                raise ValueError("Team U checkpoint dedup policy changed")
+            gate = gate_class(config["evaluation_device"]).from_checkpoint(path, mode="learned")
+            gate.interactive_target = "team_u"
+        elif method == "csm_st":
             # Per-instance subclass avoids changing old CSM runtime global state.
             class InteractiveCSM(CSMExposureGate):
                 device = config["evaluation_device"]
@@ -292,6 +305,9 @@ def learned_gates(config, name):
 def select(gate, baseline):
     from .types import ExposureAction
 
+    if getattr(gate, "interactive_target", None) == "team_u":
+        from .interactive_team_u import select as select_team_u
+        return select_team_u(gate, baseline)
     events = [event_from_row(baseline, i) for i in range(len(baseline["candidates"]))]
     if hasattr(gate, "predictor"):
         kept, duplicates = gate.deduplicator.indices([e.memory.content for e in events])

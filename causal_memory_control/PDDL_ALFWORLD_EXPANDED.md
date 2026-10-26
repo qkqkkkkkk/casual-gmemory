@@ -1,5 +1,7 @@
 # 扩大实验 v2：PDDL 五折与 ALFWorld 更多独立任务
 
+2026-10-26 新增的九策略版本见文末“v3：增加 Local–Global + Team U + semantic dedup”。原 v2 八策略命令和结果保留。
+
 用户于 2026-10-23 确认：PDDL 保留原 60 题做五折；ALFWorld 使用 support 100 / fit 800 / dev 200，额外预留 500 题测评，并独立保留 134 题 unseen 测评。旧 ST、QA 代码、旧 checkpoint 和结果不变。小规模 v1 的运行说明保留在 `PDDL_ALFWORLD_BENCHMARK.md`；此文是扩大版的命令。
 
 ## 数据与报告口径
@@ -120,3 +122,59 @@ python -m causal_memory_control.interactive_report \
 旧 Oracle 未完成时，可将 qa-results-root 改为已完成的 `all_trained_gates_with_old_st_retest_v2`，缺失项留空。FEVER/HotpotQA 不重新训练或测评。
 
 本地验证：完整 `test_interactive_benchmark` 共 22 项，覆盖五折隔离与 OOF 来源核验、扩大 ALFWorld 的场景划分、两种测评组不混合、默认 v1 行为、恢复和真实 PDDL 计划回放。扩大版 plan-only 已核验任务数与分支上限；未运行服务器训练、完整 CE 或正式测评，没有新增成绩。
+
+## v3：增加 Local–Global + Team U + semantic dedup
+
+新增行复用 FEVER/HotpotQA 的 `local_global_team_u.py` 模型加载和决策类。其标签是同一原始候选列表、同初态与 sample seed 下的 `U_i = mean(Success_KEEP_ALL) - mean(Success_SINGLE_DROP_i)`。标签阶段逐条核验原始 action 文件哈希、分支身份、全部 repeats 和聚合均值，不读取专家动作或 CE，也不新增诊断团队运行。持久化字段为 `team_u`、`q_use`、`q_drop`；训练循环内部暂用通用的 `ci` 张量字段，导出的 checkpoint、dev 预测及 loss 字段均标识 Team U。
+
+与 CE 行相同的条件包括：support/fit/dev/test、冻结 memory、检索候选与顺序、团队配置、生成模型/seed/温度/步数、BERT + 3 层 8 头列表 attention + 无界单头、优化器/学习率、seed 2024、10 epochs、batch 16、beta .1，以及 MiniLM 语义去重阈值 .98。两行的冻结去重模型身份必须一致。各折依然独立训练、独立 dev 选 epoch。
+
+部署沿用 QA Team U 的具体规则：先对完整原列表评分，再按原检索顺序进行 greedy semantic dedup；只保留 `predicted_team_u > 0` 的非重复项。U=0 也删除，kappa=delta=0，删除数不限，没有 KEEP ALL fallback 或按保留率校准。日志保存每条预测、重复来源、删除原因和实际动作结果；同动作继续复用 ActionStore。
+
+必须保留的协议差异：CE 先去重再标注/评分，fit 可以跨题重组并重新计算 CE；Team U 对应的是已测原列表，训练和评分保留此列表，禁用跨题重组和训练前去重。其损失使用 QA Team U 已有的 reward 尺度适配：positive/negative epsilon=.05/.25、hard threshold=.1、rarity bin width=.25、trivial keep fraction=1；CE 仍为 .1/.3、5、1、.2。两者相同的损失结构是 rarity-weighted MSE + 同列表 InfoNCE，但不能称为完全只换标签的单变量消融。若没有有效对，照实记录 InfoNCE 未激活。SINGLE DROP 的 U 不识别联合多条删除效用；Oracle 的固定动作集也不包含任意 learned 多条删除子集。
+
+新增代码为 `interactive_protocol.py`、`interactive_team_u.py`、`interactive_demo.py`、`tests/test_interactive_team_u.py`；同步更新 `run_interactive_gate_benchmark.py`、`interactive_data.py`、`interactive_training.py`、`interactive_worker.py`、`interactive_report.py` 和本文。服务器还需要仓库中已有的 `local_global_team_u.py`。旧 QA、ST、CE 核心文件及已完成结果不改动。
+
+默认依旧八行；加入 `--include-local-global-team-u` 后才执行九行。更新源码和策略集合需要新输出目录，旧 manifest 和输出保持原状；不通过修改旧 config_digest 来混入不同协议的分支。下列完整命令在服务器自行执行，当前未启动正式实验：
+
+```bash
+cd /mnt/mydata/hjq/casual-gmemory
+conda activate gmemory
+
+python -m unittest causal_memory_control.tests.test_interactive_benchmark \
+  causal_memory_control.tests.test_interactive_team_u -q
+
+expanded_team_u=(
+  python -u -m causal_memory_control.run_interactive_gate_benchmark
+  --output-dir causal_memory_control/results/pddl_alfworld_gate_expanded_v3_team_u
+  --datasets pddl,alfworld --pddl-folds 5
+  --alf-support 100 --alf-fit 800 --alf-dev 200 --alf-heldout-test 500
+  --include-local-global-team-u
+  --endpoint http://127.0.0.1:11442/v1 --model qwen2.5:7b
+  --generator-model /mnt/mydata/hjq/ollama/models/huggingface/Qwen2.5-7B-Instruct
+  --encoder-model bert-base-uncased
+  --embedding-model sentence-transformers/all-MiniLM-L6-v2
+  --ce-device cuda:0 --train-device cuda:0 --evaluation-device cpu
+  --max-steps 30 --repeats 2
+)
+
+CUDA_VISIBLE_DEVICES=5 "${expanded_team_u[@]}" --plan-only
+CUDA_VISIBLE_DEVICES=5 "${expanded_team_u[@]}" --stage smoke
+# 核对数据、模型路径、GPU/endpoint、smoke 和预算后，用户启动正式全流程：
+CUDA_VISIBLE_DEVICES=5 "${expanded_team_u[@]}" --stage all
+```
+
+设备与端点须按实际服务指定。九策略 stages 为 experts → support → collect → labels → labels_team_u → train_reward → train_csm → train_team_u → evaluate → report。新增 Team U 标签不加载 Qwen；新增 BERT 训练和推理分别留在各自子进程。已有 v3 同配置采集完成后也可以单独运行 `--stage labels_team_u`、`--stage train_team_u`。
+
+规模保持 support=140、诊断上限=16,800、专家任务使用=1,200、CE forward 上限不变。测试团队运行上限从 6,246 增至 6,940：PDDL 600、ALFWorld 6,340；新增至多 694，若 Team U 选中已有动作则更少。模型训练增加五个独立 PDDL 折及一个 ALFWorld 的 Team U 模型。主表共九行，PDDL 为 60 题 OOF，ALFWorld 为 134 unseen 和额外 500 独立列；逐任务、配对比较、CI、loss、进度和哈希继续保存。旧 QA 只读导入；没有被验证导入的 QA Team U 分数保持空白。
+
+只生成模拟输出无需数据文件、环境、模型或服务：
+
+```bash
+python -m causal_memory_control.interactive_demo \
+  --output-dir causal_memory_control/results/pddl_alfworld_team_u_simulation
+```
+
+该命令用带 `sim:` ID 的人工构造日志调用正式报告器，生成 `example_results.md` 和 `matrix_results.md/.csv/.json`。模拟配置、原始策略行、汇总 JSON 和 CSV 都带 simulation 标记，MD 顶部明确说明，不可与实测行混用；模拟器需要全新空目录。它仅展示九行表格及两组 ALFWorld 测评的输出格式，不是新方法性能预测。
+
+本次本地验证共 32 项通过：原交互基准 24 项、新 Team U 8 项，包含真实小型 BERT 训练/保存/重载、配对分支篡改拒绝、去重模型身份一致、无限删除、动作复用、恢复覆盖、五折 OOF 和模拟/实测隔离。完整九策略只读 plan 已核对上述规模；未运行正式模型训练或服务器实验，也未重跑 FEVER/HotpotQA。

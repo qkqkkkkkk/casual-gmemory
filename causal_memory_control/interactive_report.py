@@ -10,14 +10,7 @@ import random
 import statistics
 
 from .interactive_data import digest, locked, save, sha
-
-POLICIES = (
-    ("always_use", "Always Use baseline"), ("global_drop", "Always Global Drop"),
-    ("random_drop", "Random Drop"), ("semantic_linear", "Semantic Linear Gate"),
-    ("semantic_mlp", "Semantic MLP (three heads)"), ("semantic_st", "Semantic ST direct U + InfoNCE"),
-    ("csm_st", "CSM-ST Local–Global CE proxy"),
-    ("oracle", "Oracle Selective Drop (post hoc)"),
-)
+from .interactive_protocol import POLICIES, learned_methods, policies
 
 
 def interval(values, *, groups=None, seed=71, samples=2000):
@@ -105,7 +98,10 @@ def aggregate_cv(config, name):
 
 
 def report(config, qa_root=None):
+    if config.get("simulation") and qa_root is not None:
+        raise ValueError("simulation reports cannot mix in measured QA results")
     output = Path(config["output_dir"])
+    registered_policies = policies(config)
     summaries = {}
     for name, data in config["experiments"].items():
         root = output / name
@@ -120,12 +116,14 @@ def report(config, qa_root=None):
                     else set(data["split"]["test"]))
         for row in rows:
             method, task_id = row["policy"], row["task_id"]
+            if bool(row.get("simulation", False)) != bool(config.get("simulation", False)):
+                raise ValueError("cannot mix simulated and measured policy logs")
             if task_id in by_method[method]:
                 raise ValueError("duplicate task-policy result")
             if row["config_digest"] != digest(config) or task_id not in expected:
                 raise ValueError("unregistered evaluation result")
             by_method[method][task_id] = row
-        methods = {m for m, _ in POLICIES} | {f"random_drop_seed{s}" for s in config["random_seeds"]}
+        methods = {m for m, _ in registered_policies} | {f"random_drop_seed{s}" for s in config["random_seeds"]}
         if set(by_method) != methods or any(set(g) != expected for g in by_method.values()):
             raise ValueError("incomplete strategy/task coverage; refusing partial averages")
         baseline = by_method["always_use"]
@@ -164,8 +162,9 @@ def report(config, qa_root=None):
             if oracle < by_method["global_drop"][task_id]["outcome"]["success"]:
                 raise ValueError("Oracle candidate set should include DROP ALL")
         checkpoints = (cv_provenance["checkpoints_sha256"] if cv_provenance else
-            {m: sha(root / m / "checkpoint.json") for m in ("semantic_linear", "semantic_mlp", "semantic_st", "csm_st")})
+            {m: sha(root / m / "checkpoint.json") for m in learned_methods(config)})
         summaries[name] = {"schema": "interactive-comparison-v1", "metric": "success",
+            "simulation": bool(config.get("simulation", False)),
             "aggregation": "task-weighted_micro_mean; group macro also reported",
             "bootstrap": "paired_cluster_percentile_2000_resamples_seed71_by_scene_or_problem",
             "small_test_warning": f"Primary test has {len(primary_ids)} tasks; inspect scene/problem cluster count",
@@ -178,7 +177,9 @@ def report(config, qa_root=None):
             "config_digest": digest(config), "policies": result,
             "budgets": {"reward_gates": "dev-selected 0 or 1 SINGLE DROP", "random": "one SINGLE DROP per seed",
                 "csm": "unlimited; keep iff predicted CI>0 after dedup",
-                "oracle": "KEEP ALL + every SINGLE DROP + DROP ALL; excludes arbitrary CSM subsets"},
+                "local_global_team_u": ("unlimited; full-list U scoring then dedup; keep iff U>0"
+                                        if config.get("include_local_global_team_u") else "not enabled"),
+                "oracle": "KEEP ALL + every SINGLE DROP + DROP ALL; excludes arbitrary CSM/Team U subsets"},
             "interpretation": "method-level comparison; proxy, architecture and action budgets differ; Oracle is post hoc"}
         save(root / "comparison.json", summaries[name])
         save(root / "summary.json", {k: v for k, v in summaries[name].items() if k != "policies"} | {
@@ -187,15 +188,18 @@ def report(config, qa_root=None):
     if qa_root is not None:
         from .interactive_prior_results import import_qa
         prior = import_qa(qa_root)
-    save(output / "matrix_results.json", {"schema": "interactive-matrix-v1", "datasets": summaries,
+    simulation = bool(config.get("simulation", False))
+    save(output / "matrix_results.json", {"schema": "interactive-matrix-v1", "simulation": simulation, "datasets": summaries,
         "fever_hotpotqa": prior or "not executed or inferred from screenshot; no imported verified source provided"})
-    text = ("| Policy | FEVER binary Accuracy % | HotpotQA Answer F1 / EM % | PDDL Success % | ALFWorld Success % |\n"
-            "| --- | ---: | ---: | ---: | ---: |\n")
+    extra_cohort = "train_scene_holdout" in summaries.get("alfworld", {}).get("test_cohorts", {})
+    text = ("| Policy | FEVER binary Accuracy % | HotpotQA Answer F1 / EM % | PDDL Success % | ALFWorld unseen Success % |"
+            + (" ALFWorld extra holdout Success % |" if extra_cohort else "")
+            + "\n| --- | ---: | ---: | ---: | ---: |" + (" ---: |" if extra_cohort else "") + "\n")
     table = io.StringIO()
     writer = csv.writer(table)
     writer.writerow(["policy", "dataset", "primary_metric", "primary_percent", "answer_em_percent",
-                     "paired_delta_pp", "delta_95ci_pp", "n"])
-    for method, label in POLICIES:
+                     "paired_delta_pp", "delta_95ci_pp", "n", "simulation"])
+    for method, label in registered_policies:
         cells = []
         for name in ("fever", "hotpotqa"):
             old = prior.get(name, {}).get("policies", {}).get(method)
@@ -204,16 +208,19 @@ def report(config, qa_root=None):
             if old:
                 writer.writerow([label, name, prior[name]["metric"], 100*old["primary"],
                     100*old["answer_em"] if old["answer_em"] is not None else "", 100*old["paired_delta"],
-                    json.dumps([100*v for v in old["paired_delta_95ci"]]), len(old["task_ids"])])
+                    json.dumps([100*v for v in old["paired_delta_95ci"]]), len(old["task_ids"]), simulation])
         for name in ("pddl", "alfworld"):
             stats = summaries.get(name, {}).get("policies", {}).get(method)
             cells.append(f"{100*stats['success']:.2f}" if stats else "—")
             if stats:
                 writer.writerow([label, name, "success", 100*stats["success"], "", 100*stats["paired_delta"],
-                    json.dumps([100*v for v in stats["paired_delta_95ci"]]), stats["n"]])
+                    json.dumps([100*v for v in stats["paired_delta_95ci"]]), stats["n"], simulation])
                 for cohort, sub in stats.get("cohort_results", {}).items():
                     writer.writerow([label, name + ":" + cohort, "success", 100*sub["success"], "",
-                        100*sub["paired_delta"], json.dumps([100*v for v in sub["paired_delta_95ci"]]), sub["n"]])
+                        100*sub["paired_delta"], json.dumps([100*v for v in sub["paired_delta_95ci"]]), sub["n"], simulation])
+        if extra_cohort:
+            stats = summaries["alfworld"]["policies"][method]["cohort_results"]["train_scene_holdout"]
+            cells.append(f"{100*stats['success']:.2f}")
         text += f"| {label} | {' | '.join(cells)} |\n"
     if "pddl" in summaries:
         pddl = summaries["pddl"]
@@ -223,13 +230,19 @@ def report(config, qa_root=None):
     text += ("\nSuccess 使用显式 won，progress 单独保存。"
              "Random 为预声明随机种子的均值；Oracle 只在已声明动作中事后选择。"
              "FEVER/HotpotQA 仅可从已有日志只读导入，缺失保留为空。未核验的截图分数不纳入本表。\n")
+    if config.get("include_local_global_team_u"):
+        text += ("\nTeam U 在原候选列表上训练和评分，随后语义去重，保留 U>0 的非重复项，删除不限量。"
+                 "复用已测 KEEP/SINGLE DROP Success，不使用专家或 CE，不重组候选列表；损失采用 QA Team U 的 reward 尺度参数。"
+                 "Oracle 的固定动作集不包含任意 learned 多条删除子集，因此不保证压过它们。\n")
     for name, summary in summaries.items():
         if summary["test_cohorts"]:
             text += f"\n{name} 主表仅使用预声明的 {len(summary['primary_test_ids'])} 题主测评集。额外测评分组：\n\n"
             text += "| Policy | Cohort | N | Success % |\n| --- | --- | ---: | ---: |\n"
-            for method, label in POLICIES:
+            for method, label in registered_policies:
                 for cohort, stats in summary["policies"][method]["cohort_results"].items():
                     text += f"| {label} | {cohort} | {stats['n']} | {100*stats['success']:.2f} |\n"
+    if simulation:
+        text = "**模拟输出：全部分数来自人工构造的合成日志，仅展示格式，不代表实测或预期效果。**\n\n" + text
     (output / "matrix_results.md").write_text(text)
     (output / "matrix_results.csv").write_text(table.getvalue())
     return summaries
