@@ -2,8 +2,9 @@
 
 Read registered seed0 diagnostic branches and frozen memory, fit a new BERT /
 list-attention / scalar utility model, then evaluate only that model. The old ST
-and CE methods are independent. No CE forwards, Qwen training, diagnostic
-collection, deduplication or candidate recombination are performed.
+and CE methods are independent. Full-list Team U scoring is followed by the CE
+method's semantic deduplication. No CE forwards, Qwen training, diagnostic
+collection or candidate recombination are performed.
 """
 from __future__ import annotations
 
@@ -19,14 +20,17 @@ import traceback
 from . import run_csm_st_benchmark as csm
 from .compare_gate_runs import file_sha256
 from .csm_st_data import digest, save_json
-from .local_global_team_u import SCHEMA, checkpoint_spec, validate_labels
+from .local_global_team_u import SCHEMA, checkpoint_spec, deployment_dedup, validate_labels
 
 
 NOTE = ("Local--Global architecture with measured paired Team U = mean(R_USE)-mean(R_SINGLE_DROP). "
         "Trainable BERT + 3-layer/8-head candidate self-attention + one unbounded utility head. "
-        "Original candidate lists retained: no deduplication/recombination or new label collection. "
+        "Original candidate lists retained for measured targets and model scoring. "
+        "Semantic deduplication follows scoring, using the CE method's frozen model/greedy rule; "
+        "unlike CE, the predictor sees the original list, not an already-deduplicated list. "
+        "No recombination or new label collection. "
         "Rarity-weighted MSE + same-list InfoNCE; reward-scale thresholds are explicit adaptations. "
-        "Keep predicted U>0; unlimited drops, unlike old max-one-drop ST. "
+        "Keep predicted U>0 nonduplicate memories; unlimited drops and no matched-keep-rate calibration. "
         "Single-drop labels do not identify joint multi-drop reward. "
         "FEVER binary Accuracy; HotpotQA Answer F1/EM. No generator fine-tuning or CE scoring.")
 
@@ -34,7 +38,7 @@ NOTE = ("Local--Global architecture with measured paired Team U = mean(R_USE)-me
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--source-root", type=Path, default=Path("causal_memory_control/results/full_gate_benchmark_v1"))
-    parser.add_argument("--output-dir", type=Path, default=Path("causal_memory_control/results/local_global_team_u_v1"))
+    parser.add_argument("--output-dir", type=Path, default=Path("causal_memory_control/results/local_global_team_u_dedup_v1"))
     parser.add_argument("--datasets", default="fever,hotpotqa")
     for dataset in ("fever", "hotpotqa"):
         parser.add_argument(f"--{dataset}-results-root", type=Path,
@@ -62,6 +66,8 @@ def parse_args(argv=None):
     parser.add_argument("--rarity-alpha", type=float, default=10.0)
     parser.add_argument("--hard-threshold", type=float, default=0.1)
     parser.add_argument("--rarity-bin-width", type=float, default=0.25)
+    parser.add_argument("--dedup-threshold", type=float, default=0.98,
+                        help="CE-style semantic cosine threshold; applied after full-list Team U prediction")
     args = parser.parse_args(argv)
     args.datasets = list(dict.fromkeys(v.strip() for v in args.datasets.split(",") if v.strip()))
     if not args.datasets or set(args.datasets) - {"fever", "hotpotqa"}:
@@ -70,11 +76,12 @@ def parse_args(argv=None):
         parser.error("training counts must be positive and max-pair-tokens >=8")
     numbers = (args.encoder_learning_rate, args.head_learning_rate, args.weight_decay, args.beta,
         args.temperature, args.positive_epsilon, args.negative_epsilon, args.rarity_alpha,
-        args.hard_threshold, args.rarity_bin_width)
+        args.hard_threshold, args.rarity_bin_width, args.dedup_threshold)
     if (not all(math.isfinite(v) for v in numbers) or min(args.encoder_learning_rate,
             args.head_learning_rate, args.temperature, args.rarity_bin_width) <= 0
             or min(args.beta, args.weight_decay, args.rarity_alpha) < 0
-            or not 0 < args.positive_epsilon < args.negative_epsilon <= 2):
+            or not 0 < args.positive_epsilon < args.negative_epsilon <= 2
+            or not 0 < args.dedup_threshold <= 1):
         parser.error("invalid Team U loss/optimization settings")
     args.source_root, args.output_dir = args.source_root.resolve(), args.output_dir.resolve()
     roots = [args.source_root]
@@ -101,14 +108,13 @@ def settings(suite):
         "gradient_checkpointing": True}, "training": {**{name: getattr(suite, name) for name in names},
         "device": suite.train_device, "trivial_threshold": suite.hard_threshold, "trivial_keep_fraction": 1.0},
         "evaluation_device": suite.evaluation_device, "evaluation_endpoint": suite.evaluation_endpoint,
-        "selection_rule": "keep_iff_team_u_gt_zero", "deduplication": False, "recombination": False}
+        "selection_rule": "keep_iff_team_u_gt_zero_and_not_duplicate",
+        "deduplication": True, "dedup_placement": "post_score", "recombination": False}
 
 
 def dataset_config(suite, adapter, args, hashes):
     # Source import/partition validation is shared; CE labels and settings are not.
-    template = type("SourceOptions", (), {"dedup_threshold": 1.0})()
-    data = csm.dataset_config(template, adapter, args, with_hashes=hashes)
-    data.pop("dedup")
+    data = csm.dataset_config(suite, adapter, args, with_hashes=hashes)
     data["training_metric"] = adapter.training_metric
     return data
 
@@ -123,9 +129,12 @@ def checkpoint_ready(adapter, args, config):
             and raw.get("training_metadata", {}).get("config_digest") == digest(config)
             and raw["training_metadata"].get("estimator", {}).get("type") == "local_global_team_u"):
         return False
-    payload, _, _ = checkpoint_spec(args.checkpoint)
+    payload, spec, _ = checkpoint_spec(args.checkpoint)
     if payload["training_metadata"].get("config_digest") != digest(config):
         raise ValueError("Team U checkpoint belongs to another configuration")
+    provenance = json.loads((args.checkpoint.parent / "labels_manifest.json").read_text())
+    if spec["dedup"] != deployment_dedup(provenance):
+        raise ValueError("checkpoint dedup policy differs from its recorded training protocol")
     adapter.validate_checkpoint(payload, args, csm.reuse.base._load_json(args.memory_dir / "causal_snapshot_manifest.json"))
     return True
 
@@ -140,7 +149,7 @@ def evaluation_commands(suite, adapter, args, dataset):
 def report(suite, prepared):
     rows, details = [], {}
     for method, label in (("native_gmemory", "Always Use (baseline)"),
-                           ("local_global_team_u", "Local–Global + Team U")):
+                           ("local_global_team_u", "Local–Global + Team U + semantic dedup")):
         row = {"Policy": label}
         for dataset, (adapter, args) in prepared.items():
             baseline = csm.reuse.baseline_dir(args)
@@ -181,7 +190,9 @@ def main(argv=None):
         "final_test_offset": data["original_test_offset"], "sources": data["sources"], "baseline": data["baseline"],
         "label_metric": data["training_metric"], "new_label_team_rollouts": 0, "ce_forwards": 0,
         "new_test_team_inferences_at_most": len(data["test_ids"]), "other_methods_run": [],
-        "selection_rule": "keep_iff_team_u_gt_zero; unlimited drops", "deduplication": False,
+        "selection_rule": "keep_iff_team_u_gt_zero_and_not_duplicate; unlimited drops",
+        "deduplication": True, "dedup_placement": "post_score", "dedup": data["dedup"],
+        "matched_keep_rate": False,
         "recombination": False} for name, data in config["experiments"].items()}
     print(json.dumps({"schema": SCHEMA, "plan_only": suite.plan_only, "datasets": plan,
                       "settings": config["settings"], "notes": NOTE}, ensure_ascii=False, indent=2), flush=True)
@@ -193,7 +204,8 @@ def main(argv=None):
             raise FileNotFoundError(f"{name}: completed original baseline is required")
         config["experiments"][name] = dataset_config(suite, adapter, args, True)
     config["code_sha256"] = {name: file_sha256(Path(__file__).with_name(name)) for name in
-        (Path(__file__).name, "local_global_team_u.py", "csm_st_model.py", "csm_st_training.py", "csm_st_data.py")}
+        (Path(__file__).name, "local_global_team_u.py", "csm_st_model.py", "csm_st_training.py", "csm_st_data.py",
+         "csm_st_worker.py")}
     manifest = suite.output_dir / "team_u_manifest.json"
     if not manifest.exists() and suite.output_dir.exists() and any(suite.output_dir.iterdir()):
         raise ValueError("use a new Team U output directory")

@@ -1,10 +1,10 @@
 """Local--Global architecture with measured Team U targets, without CE scoring.
 
 Reuse paired USE ALL / SINGLE DROP rewards on the ORIGINAL candidate lists.
-Deduplication and cross-task recombination are disabled because either would
-change the intervention whose reward was measured. The existing LocalGlobalCSM
-network and supervised training loop are reused, with a separate checkpoint
-schema, runtime, and output directory. No Qwen weights are loaded here.
+Predict on that full list, then remove duplicate memories with the CE method's
+frozen semantic deduplicator. This preserves the measured target's conditioning
+set; it is not a claim to have Team U labels for deduplicated training lists.
+Cross-task recombination is disabled. No Qwen weights are loaded here.
 """
 from __future__ import annotations
 
@@ -132,9 +132,25 @@ def validate_labels(root, config):
 
 
 def label_stage(config, dataset):
+    from .csm_st_worker import dedup_identity
+    from .semantic_features import SentenceTransformerEmbedder
+
     data, root = config["experiments"][dataset], Path(config["output_dir"]) / dataset
     rows = load_team_u_lists(data)
     fit_ids, dev_ids = split_ids(data["diagnostic_ids"], data["dev_fraction"], 71)
+    # Freeze the same semantic model/threshold used by CE, without removing any
+    # item from the list on which the already-measured Team U is conditioned.
+    dedup = data["dedup"]
+    encoder = SentenceTransformerEmbedder(dedup["model"], revision=dedup.get("revision"),
+        chunk_tokens=dedup["chunk_tokens"], cache_path=root / "dedup.sqlite", device="cpu")
+    try:
+        identity = dedup_identity(encoder, dedup)
+    finally:
+        encoder.close()
+    identity_path = root / "dedup_identity.json"
+    if identity_path.exists() and json.loads(identity_path.read_text()) != identity:
+        raise ValueError("Team U runtime dedup model changed; use the original model or a new output")
+    save_json(identity_path, identity)
     write_rows(root / "team_u_labels.jsonl", rows)
     save_json(root / "split.json", {"fit_task_ids": sorted(fit_ids), "dev_task_ids": sorted(dev_ids),
         "final_test_ids": data["test_ids"], "split_seed": 71})
@@ -147,9 +163,21 @@ def label_stage(config, dataset):
     save_json(root / "labels_manifest.json", {"schema": SCHEMA, "config_digest": digest(config),
         "label_type": LABEL, "metric": data["training_metric"], "source_sha256": data["input_sha256"],
         "fit_task_ids": sorted(fit_ids), "dev_task_ids": sorted(dev_ids),
-        "deduplication": False, "recombination": False, "new_team_rollouts": 0, "ce_forwards": 0,
+        "deduplication": True, "dedup_placement": "post_score", "dedup_identity": identity,
+        "training_candidate_deduplication": False, "recombination": False,
+        "new_team_rollouts": 0, "ce_forwards": 0,
         "team_u_distribution": distributions, "artifact_sha256": {name: file_sha256(root / name)
-            for name in ("team_u_labels.jsonl", "split.json")}})
+            for name in ("team_u_labels.jsonl", "split.json", "dedup_identity.json")}})
+
+
+def deployment_dedup(provenance):
+    """Resolved immutable dedup configuration; older checkpoints can disable it."""
+    if not provenance.get("deduplication"):
+        return {"enabled": False}
+    spec = {**provenance["dedup_identity"], "enabled": True, "placement": "post_score"}
+    if spec.get("resolved_commit"):
+        spec["revision"] = spec["resolved_commit"]
+    return spec
 
 
 def train_stage(config, dataset):
@@ -171,12 +199,13 @@ def train_stage(config, dataset):
     payload = train(rows, root, model_config=CSMConfig(**config["settings"]["model_config"]),
         options=config["settings"]["training"], fit_ids=set(provenance["fit_task_ids"]),
         dev_ids=set(provenance["dev_task_ids"]), metadata=metadata,
-        dedup_config={"enabled": False}, label_provenance=provenance)
+        dedup_config=deployment_dedup(provenance), label_provenance=provenance)
     spec = payload.pop("csm_st")
     spec.update(schema=SCHEMA, label_type=LABEL, target_range=[-1, 1], output_activation="unbounded")
     payload["local_global_team_u"] = spec
     payload["training_metadata"]["policy_calibration"].update(
-        selection_rule="keep_iff_team_u_gt_zero", note="dev selects epoch only; unlimited drops")
+        selection_rule="keep_iff_team_u_gt_zero_and_not_duplicate",
+        note="dev selects epoch only; full-list scoring then semantic dedup; unlimited drops")
     history = payload["training_diagnostics"]["loss_history"]
     for epoch in history:
         epoch["dev_team_u_sign_accuracy"] = epoch.pop("dev_ci_sign_accuracy")
@@ -196,8 +225,14 @@ def checkpoint_spec(checkpoint):
     checkpoint = Path(checkpoint)
     payload = json.loads(checkpoint.read_text())
     spec = payload.get("local_global_team_u", {})
+    dedup = spec.get("dedup", {})
+    valid_dedup = (dedup == {"enabled": False} or
+        dedup.get("enabled") is True and dedup.get("placement") == "post_score"
+        and isinstance(dedup.get("model"), str) and bool(dedup["model"])
+        and isinstance(dedup.get("threshold"), (int, float)) and 0 < dedup["threshold"] <= 1
+        and isinstance(dedup.get("chunk_tokens"), int) and dedup["chunk_tokens"] >= 8)
     if (payload.get("schema") != CHECKPOINT_SCHEMA or spec.get("schema") != SCHEMA
-            or spec.get("label_type") != LABEL or spec.get("dedup") != {"enabled": False}):
+            or spec.get("label_type") != LABEL or not valid_dedup):
         raise ValueError("expected a Local--Global Team U checkpoint; CE/old ST checkpoints are incompatible")
     artifact = checkpoint.parent / spec["artifact_dir"]
     if artifact.resolve().parent != checkpoint.parent.resolve() or "weights.pt" not in spec["artifact_sha256"]:
@@ -230,7 +265,7 @@ def gate_class(device="cpu"):
     from .types import ExposureAction, PotentialOutcomePrediction
 
     class LocalGlobalTeamUGate(GMemoryExposureGate):
-        def __init__(self, *, predictor, **kwargs):
+        def __init__(self, *, predictor, deduplicator=None, **kwargs):
             kwargs.setdefault("max_drops", None)
             kwargs.setdefault("kappa", 0.0)
             kwargs.setdefault("delta", 0.0)
@@ -239,14 +274,32 @@ def gate_class(device="cpu"):
                 raise ValueError("Local--Global Team U keeps U>0 with kappa=delta=0 and unlimited drops")
             super().__init__(estimator=SimpleNamespace(fitted=True), **kwargs)
             self.predictor, self._scores = predictor, {}
+            self.deduplicator, self._duplicates = deduplicator, {}
 
         @classmethod
         def from_checkpoint(cls, checkpoint_path, **kwargs):
-            payload, _, _ = checkpoint_spec(checkpoint_path)
+            from .csm_st_data import Deduplicator
+            from .semantic_features import SentenceTransformerEmbedder
+
+            payload, spec, _ = checkpoint_spec(checkpoint_path)
             kwargs.pop("semantic_cache_path", None)
             kwargs.pop("jev_cache_path", None)
-            return cls(predictor=load_predictor(checkpoint_path, device),
-                       checkpoint_metadata=payload["training_metadata"], **kwargs)
+            dedup, deduplicator = spec["dedup"], None
+            if dedup["enabled"]:
+                for name, expected in dedup.get("local_model_sha256", {}).items():
+                    if file_sha256(Path(dedup["model"]) / name) != expected:
+                        raise ValueError("local semantic dedup model changed since Team U training")
+                encoder = SentenceTransformerEmbedder(dedup["model"], revision=dedup.get("revision"),
+                    chunk_tokens=dedup["chunk_tokens"],
+                    cache_path=Path(checkpoint_path).parent / "dedup_runtime.sqlite")
+                deduplicator = Deduplicator(encoder, dedup["threshold"])
+            try:
+                return cls(predictor=load_predictor(checkpoint_path, device), deduplicator=deduplicator,
+                           checkpoint_metadata=payload["training_metadata"], **kwargs)
+            except BaseException:
+                if deduplicator is not None:
+                    deduplicator.encoder.close()
+                raise
 
         def filter_retrieval(self, result, *, query_task, task_state="", **kwargs):
             retrieval = self.adapter.adapt(result)
@@ -258,19 +311,32 @@ def gate_class(device="cpu"):
             if len(values) != len(candidates) or not all(math.isfinite(v) for v in values):
                 raise ValueError("invalid Team U predictions")
             self._scores = {c["id"]: v for c, v in zip(candidates, values)}
+            self._duplicates = {}
+            if self.deduplicator is not None:
+                _, duplicates = self.deduplicator.indices([c["text"] for c in candidates])
+                self._duplicates = {candidates[i]["id"]: candidates[j]["id"] for i, j in duplicates.items()}
             return super().filter_retrieval(result, query_task=query_task, task_state=task_state, **kwargs)
 
         def _decide(self, event):
             value = self._scores[event.memory.memory_id]
-            keep = value > 0
+            duplicate = self._duplicates.get(event.memory.memory_id)
+            keep = duplicate is None and value > 0
             prediction = PotentialOutcomePrediction(0.0, 0.0, value,
-                "positive" if keep else "nonpositive", 0.0, "local_global_team_u", False,
+                "positive" if value > 0 else "nonpositive", 0.0, "local_global_team_u", False,
                 self.checkpoint_metadata.get("training_samples", 0))
             return ExposureDecision(event.event_id, event.memory.memory_id, event.memory.memory_type,
                 ExposureAction.KEEP if keep else ExposureAction.DROP, value,
-                "team_u_positive" if keep else "team_u_nonpositive", prediction,
-                policy_scores={"predicted_team_u": value, "selection_rule": "keep_iff_team_u_gt_zero",
-                    "q_use_q_drop_are_placeholders": True, "deduplication": False})
+                "team_u_duplicate" if duplicate is not None else "team_u_positive" if keep else "team_u_nonpositive", prediction,
+                policy_scores={"predicted_team_u": value, "duplicate_of": duplicate,
+                    "selection_rule": ("keep_iff_team_u_gt_zero_and_not_duplicate" if self.deduplicator is not None
+                                       else "keep_iff_team_u_gt_zero"),
+                    "q_use_q_drop_are_placeholders": True, "deduplication": self.deduplicator is not None,
+                    "dedup_placement": "post_score" if self.deduplicator is not None else None})
+
+        def close(self):
+            if self.deduplicator is not None and self.deduplicator.encoder is not None:
+                self.deduplicator.encoder.close()
+            super().close()
 
     return LocalGlobalTeamUGate
 
