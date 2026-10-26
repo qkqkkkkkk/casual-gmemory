@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import types
 
 from .interactive_data import digest
@@ -229,6 +230,24 @@ class Episode:
         self.env.close()
 
 
+def expert_process_environment():
+    """Bound CPU-only experts without changing the parent's training settings."""
+    environment = os.environ.copy()
+    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+        environment[name] = "1"
+    environment.update(CUDA_VISIBLE_DEVICES="", HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1",
+                       PYTHONUNBUFFERED="1")
+    return environment
+
+
+def _output_tail(value, limit):
+    # TimeoutExpired can contain bytes even when subprocess.run(text=True).
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    return (value or "")[-limit:]
+
+
 def make_expert(task, repo, *, max_steps=200, timeout=120):
     """Generate and verify one expert plan in a fresh, bounded Python process.
 
@@ -242,10 +261,14 @@ def make_expert(task, repo, *, max_steps=200, timeout=120):
                    "--expert-output", str(result_path)]
         try:
             completed = subprocess.run(command, cwd=Path(__file__).resolve().parents[1],
-                input=json.dumps({"task": task, "repo": str(Path(repo).resolve()), "max_steps": max_steps}),
-                capture_output=True, text=True, timeout=timeout)
+                input=json.dumps({"task": task, "repo": str(Path(repo).resolve()), "max_steps": max_steps,
+                                  "traceback_interval": min(60.0, max(0.1, timeout * 0.8))}),
+                env=expert_process_environment(), capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"expert subprocess timed out after {timeout}s: {task['id']}") from exc
+            raise RuntimeError(f"expert subprocess timed out after {timeout}s: {task['id']}\n"
+                "The budget includes imports, environment initialization, planning and replay.\n"
+                "Recent child output (last expert_phase identifies the pending operation):\n"
+                + _output_tail(exc.stdout, 4000) + _output_tail(exc.stderr, 12000)) from exc
         if completed.returncode:
             raise RuntimeError(f"expert subprocess failed: {task['id']}; returncode={completed.returncode}\n"
                                + completed.stdout[-4000:] + completed.stderr[-8000:])
@@ -267,14 +290,29 @@ def make_expert(task, repo, *, max_steps=200, timeout=120):
 _EXPERT_STARTED = False
 
 
-def _make_expert_once(task, repo, *, max_steps=200):
+def _make_expert_once(task, repo, *, max_steps=200, traceback_interval=60):
     """Single-use entry for the CLI or an existing bounded expert_one worker."""
+    import faulthandler
+
     global _EXPERT_STARTED
     if _EXPERT_STARTED:
         raise RuntimeError("an expert process can handle only one task; call make_expert for a fresh process")
     _EXPERT_STARTED = True
-    episode = Episode(task, repo, max_steps, expert=task["dataset"] == "alfworld")
+    started, phases = time.monotonic(), []
+
+    def phase(name, **details):
+        entry = {"expert_phase": name, "task_id": task["id"],
+                 "elapsed_seconds": round(time.monotonic() - started, 3), **details}
+        phases.append(entry)
+        print(json.dumps(entry), file=sys.stderr, flush=True)
+
+    # Dump the pending Python/native call periodically before an outer timeout.
+    faulthandler.dump_traceback_later(traceback_interval, repeat=True)
+    episode = None
     try:
+        phase("environment_init")
+        episode = Episode(task, repo, max_steps, expert=task["dataset"] == "alfworld")
+        phase("environment_ready")
         actions = []
         planner_normalization = None
         if task["dataset"] == "pddl":
@@ -285,16 +323,21 @@ def _make_expert_once(task, repo, *, max_steps=200):
             problem = next(Path(repo) / p for p in task["files"] if Path(p).parent.name == domain)
             domain_text, problem_text, planner_normalization = planner_inputs(
                 (root / (domain + ".pddl")).read_text(), problem.read_text())
+            phase("pddl_translate")
             _, sas = pddl2sas(domain_text, problem_text)
+            phase("planner_load")
             lib = load_lib()
             try:
+                phase("planner_search")
                 if not lib.solve_sas(sas.encode(), False):
                     raise ValueError(f"planner failed: {task['id']}")
                 plan = (Operator * lib.get_last_plan_length())()
                 lib.get_last_plan(plan)
                 symbolic = [p.name for p in plan]
             finally:
+                phase("planner_close")
                 close_lib(lib)
+            phase("native_replay", planned_actions=len(symbolic))
             for command in symbolic:
                 tokens = command.strip("()").split()
                 valid = sorted(episode.native.env.action_space.all_ground_literals(episode.native.last_obs), key=str)
@@ -305,11 +348,13 @@ def _make_expert_once(task, repo, *, max_steps=200):
                 action = episode.native._literal_to_text(literal)
                 actions.append(action)
                 _, _, done = episode.step(action)
+                phase("native_replay_step", completed_actions=len(actions))
                 if episode.invalid_actions:
                     raise ValueError(f"planner action failed native replay: {command}; rendered={action}")
                 if done:
                     break
         else:
+            phase("alfworld_expert_replay")
             for _ in range(max_steps):
                 plan = episode.state["extra.expert_plan"]
                 if not plan:
@@ -317,10 +362,12 @@ def _make_expert_once(task, repo, *, max_steps=200):
                 action = plan[0]
                 actions.append(action)
                 _, _, done = episode.step(action)
+                phase("alfworld_replay_step", completed_actions=len(actions))
                 if done:
                     break
         if not actions or not episode.won or episode.invalid_actions:
             raise ValueError(f"expert trajectory failed validation: {task['id']}")
+        phase("validated", successful_actions=len(actions))
         return {"task_id": task["id"], "source": "fast_downward_symbolic" if task["dataset"] == "pddl"
                 else "alfworld_handcoded_text_expert", "task_files": task["files"],
                 "initial_fingerprint": episode.initial_fingerprint,
@@ -328,10 +375,18 @@ def _make_expert_once(task, repo, *, max_steps=200):
                 "actions": actions, "target": "\n".join(actions), "trajectory": episode.trace,
                 "validation": episode.result(), "supervision": "initial_public_context_full_successful_plan_ce_v1",
                 "planner_input_normalization": planner_normalization,
-                "expert_execution": {"process_policy": "one_expert_task_per_process_v1", "pid": os.getpid()},
+                "expert_execution": {"process_policy": "one_expert_task_per_process_v1", "pid": os.getpid(),
+                    "device": "cpu", "phases": phases,
+                    "thread_limits": {key: os.getenv(key) for key in
+                        ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")}},
                 "hidden_expert_state_exposed_at_runtime": False}
     finally:
-        episode.close()
+        try:
+            if episode is not None:
+                phase("environment_close")
+                episode.close()
+        finally:
+            faulthandler.cancel_dump_traceback_later()
 
 
 if __name__ == "__main__":
@@ -341,5 +396,6 @@ if __name__ == "__main__":
     parser.add_argument("--expert-output", required=True, type=Path)
     arguments = parser.parse_args()
     request = json.load(sys.stdin)
-    verified = _make_expert_once(request["task"], request["repo"], max_steps=request["max_steps"])
+    verified = _make_expert_once(request["task"], request["repo"], max_steps=request["max_steps"],
+                                 traceback_interval=request.get("traceback_interval", 60))
     arguments.expert_output.write_text(json.dumps(verified, ensure_ascii=False, allow_nan=False))

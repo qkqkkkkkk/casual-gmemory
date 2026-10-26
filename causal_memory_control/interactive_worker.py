@@ -157,10 +157,12 @@ def experts(config, name):
 
 
 def run_expert_task(config, name, task_id):
+    from .interactive_envs import expert_process_environment
+
     command = [sys.executable, "-X", "faulthandler", "-m", "causal_memory_control.interactive_worker",
         "--config", str(Path(config["output_dir"]) / "benchmark_manifest.json"),
         "--dataset", name, "--stage", "expert_one", "--task-id", task_id]
-    subprocess.run(command, check=True, timeout=config["expert_timeout"])
+    subprocess.run(command, check=True, timeout=config["expert_timeout"], env=expert_process_environment())
 
 
 def expert_one(config, name, task_id):
@@ -171,7 +173,8 @@ def expert_one(config, name, task_id):
         raise ValueError("expert supervision is restricted to fit/dev")
     task = next(r for r in data["tasks"] if r["id"] == task_id)
     # run_expert_task already provides a fresh, bounded process for this task.
-    result = _make_expert_once(task, config["repo"], max_steps=200)
+    result = _make_expert_once(task, config["repo"], max_steps=200,
+        traceback_interval=min(60.0, max(0.1, config["expert_timeout"] * 0.8)))
     save(Path(config["output_dir"]) / name / "experts" / (digest(task_id) + ".json"), result)
 
 

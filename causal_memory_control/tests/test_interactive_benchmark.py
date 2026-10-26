@@ -24,6 +24,14 @@ from causal_memory_control import run_interactive_gate_benchmark as cli
 REPO = Path(__file__).resolve().parents[2]
 
 
+def verified_test_plan(row):
+    # Shared servers may spend the original 120 s just in cold dependency I/O.
+    timeout = int(os.environ.get("CMC_EXPERT_TEST_TIMEOUT", "300"))
+    if timeout < 1:
+        raise ValueError("CMC_EXPERT_TEST_TIMEOUT must be a positive number of seconds")
+    return make_expert(row, REPO, timeout=timeout)
+
+
 def task(i, dataset="pddl"):
     return {"id": str(i), "group": f"problem:{i}", "dataset": dataset,
             "domain": "blockworld", "difficulty": "easy", "config": {}}
@@ -145,9 +153,28 @@ class MetricAndCEtests(unittest.TestCase):
             with self.subTest(message=message), mock.patch.object(envs.subprocess, "run", return_value=result):
                 with self.assertRaisesRegex(RuntimeError, message):
                     make_expert(task(1), REPO)
-        with mock.patch.object(envs.subprocess, "run", side_effect=subprocess.TimeoutExpired("expert", 1)):
-            with self.assertRaisesRegex(RuntimeError, "timed out"):
+        expired = subprocess.TimeoutExpired("expert", 1, output=b"partial stdout\n",
+            stderr=b'{"expert_phase": "planner_search"}\n')
+        with mock.patch.object(envs.subprocess, "run", side_effect=expired):
+            with self.assertRaisesRegex(RuntimeError, "timed out") as error:
                 make_expert(task(1), REPO, timeout=1)
+        self.assertIn("planner_search", str(error.exception))
+        self.assertIn("partial stdout", str(error.exception))
+
+    def test_expert_cpu_environment_preserves_parent_gpu_and_thread_settings(self):
+        from causal_memory_control.interactive_envs import expert_process_environment
+
+        with mock.patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0", "OMP_NUM_THREADS": "16"}):
+            child = expert_process_environment()
+            self.assertEqual(child["CUDA_VISIBLE_DEVICES"], "")
+            self.assertEqual(child["OMP_NUM_THREADS"], "1")
+            self.assertEqual(child["HF_HUB_OFFLINE"], "1")
+            self.assertEqual(os.environ["CUDA_VISIBLE_DEVICES"], "0")
+            self.assertEqual(os.environ["OMP_NUM_THREADS"], "16")
+        with mock.patch.dict(os.environ, {"CMC_EXPERT_TEST_TIMEOUT": "600"}), \
+             mock.patch("causal_memory_control.tests.test_interactive_benchmark.make_expert") as generate:
+            verified_test_plan(task(1))
+            self.assertEqual(generate.call_args.kwargs["timeout"], 600)
 
     def test_in_process_expert_entry_refuses_a_second_task(self):
         from causal_memory_control import interactive_envs as envs
@@ -455,17 +482,21 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(episode.steps, 0)
             finally:
                 episode.close()
-            plan = make_expert(row, REPO)
+            plan = verified_test_plan(row)
         self.assertEqual(plan["validation"]["success"], 1)
         self.assertEqual(plan["validation"]["invalid_actions"], 0)
         self.assertGreater(len(plan["actions"]), 0)
         self.assertNotEqual(plan["expert_execution"]["pid"], os.getpid())
+        self.assertEqual(plan["expert_execution"]["device"], "cpu")
+        self.assertEqual(plan["expert_execution"]["thread_limits"]["OMP_NUM_THREADS"], "1")
+        self.assertIn("planner_search", [p["expert_phase"] for p in plan["expert_execution"]["phases"]])
+        self.assertIn("validated", [p["expert_phase"] for p in plan["expert_execution"]["phases"]])
 
     def test_barman_expert_hyphen_actions_replay_without_nltk(self):
         rows, _ = pddl_inventory(REPO)
         row = next(r for r in rows if r["id"] == "pddl:barman:p01")
         with redirect_stdout(io.StringIO()):
-            plan = make_expert(row, REPO)
+            plan = verified_test_plan(row)
             # The expert now runs in a child. Verify the action parser's NLTK
             # independence here by replaying the returned plan in this process.
             episode = Episode(row, REPO)
@@ -486,7 +517,7 @@ class PipelineTests(unittest.TestCase):
         rows, _ = pddl_inventory(REPO)
         row = next(r for r in rows if r["id"] == "pddl:tyreworld:p01")
         with redirect_stdout(io.StringIO()):
-            plan = make_expert(row, REPO)
+            plan = verified_test_plan(row)
         self.assertEqual(plan["validation"]["success"], 1)
         self.assertEqual(plan["validation"]["invalid_actions"], 0)
         self.assertEqual(plan["planner_input_normalization"]["removed_duplicate_objects"], ["jack", "pump", "wrench"])

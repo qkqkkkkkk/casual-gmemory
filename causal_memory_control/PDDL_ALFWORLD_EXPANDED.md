@@ -178,3 +178,22 @@ python -m causal_memory_control.interactive_demo \
 该命令用带 `sim:` ID 的人工构造日志调用正式报告器，生成 `example_results.md` 和 `matrix_results.md/.csv/.json`。模拟配置、原始策略行、汇总 JSON 和 CSV 都带 simulation 标记，MD 顶部明确说明，不可与实测行混用；模拟器需要全新空目录。它仅展示九行表格及两组 ALFWorld 测评的输出格式，不是新方法性能预测。
 
 本次本地验证共 32 项通过：原交互基准 24 项、新 Team U 8 项，包含真实小型 BERT 训练/保存/重载、配对分支篡改拒绝、去重模型身份一致、无限删除、动作复用、恢复覆盖、五折 OOF 和模拟/实测隔离。完整九策略只读 plan 已核对上述规模；未运行正式模型训练或服务器实验，也未重跑 FEVER/HotpotQA。
+
+## 共享服务器上的专家超时
+
+若单测提示 `expert subprocess timed out after 120s: pddl:barman:p01`，表示专家子进程的总墙钟预算用完；该预算包含冷启动依赖导入、环境初始化、PDDL 转换、原生规划搜索及回放，不能据此认定数据损坏或规划器一定无解。GPU 和 Ollama 端口不参与这个 CPU 专家检查。
+
+修复后，专家子进程单独隐藏 GPU、将 BLAS/OpenMP 线程限制为 1，并强制 HF offline；父进程的训练设备/线程设置保持原值。`expert_phase` 日志区分 environment_init、pddl_translate、planner_load、planner_search、native_replay 和 validated；成功文件保留阶段耗时。慢任务每 60 秒输出 faulthandler 栈，超时异常保留子进程输出，拒绝生成不完整标签。单测默认每个真实专家任务 300 秒，可用 `CMC_EXPERT_TEST_TIMEOUT` 增加；正式实验仍由 `--expert-timeout` 单独控制，默认 120 秒。
+
+本地同步本次修改的 `interactive_envs.py`、`interactive_worker.py`、`tests/test_interactive_benchmark.py` 和本文后，在服务器先单独验证 Barman，再执行完整测试：
+
+```bash
+CMC_EXPERT_TEST_TIMEOUT=600 python -X faulthandler -m unittest \
+  causal_memory_control.tests.test_interactive_benchmark.PipelineTests.test_barman_expert_hyphen_actions_replay_without_nltk -v
+
+CMC_EXPERT_TEST_TIMEOUT=600 python -X faulthandler -m unittest \
+  causal_memory_control.tests.test_interactive_benchmark \
+  causal_memory_control.tests.test_interactive_team_u -q
+```
+
+正式实验若采用每任务 600 秒，应在定义数组时显式加入 `--expert-timeout 600`，并先运行 `--stage experts` 验证全部 fit/dev 专家，成功后再开始 support 和诊断 LLM 采集。若已生成旧 manifest，本次源码/超时设置变更须选新输出目录（如 `pddl_alfworld_gate_expanded_v4_team_u`）；保留旧产物。增加等待时间不会放宽成功回放、非法动作数或 CE target 验证。若仍超时，查看异常中的最后一个 `expert_phase` 和 faulthandler 栈，再根据实际阶段排查。
