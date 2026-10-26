@@ -4,7 +4,9 @@ from contextlib import redirect_stdout, redirect_stderr
 from copy import deepcopy
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -133,6 +135,28 @@ class DataTests(unittest.TestCase):
 
 
 class MetricAndCEtests(unittest.TestCase):
+    def test_expert_process_crash_timeout_and_missing_result_never_become_targets(self):
+        from causal_memory_control import interactive_envs as envs
+
+        for result, message in (
+            (subprocess.CompletedProcess([], -11, "", "Fatal Python error: Segmentation fault"), "returncode=-11"),
+            (subprocess.CompletedProcess([], 0, "", ""), "no valid result"),
+        ):
+            with self.subTest(message=message), mock.patch.object(envs.subprocess, "run", return_value=result):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    make_expert(task(1), REPO)
+        with mock.patch.object(envs.subprocess, "run", side_effect=subprocess.TimeoutExpired("expert", 1)):
+            with self.assertRaisesRegex(RuntimeError, "timed out"):
+                make_expert(task(1), REPO, timeout=1)
+
+    def test_in_process_expert_entry_refuses_a_second_task(self):
+        from causal_memory_control import interactive_envs as envs
+
+        with mock.patch.object(envs, "_EXPERT_STARTED", True), \
+             mock.patch.object(envs, "Episode", side_effect=AssertionError("must not load the native library")):
+            with self.assertRaisesRegex(RuntimeError, "only one task"):
+                envs._make_expert_once(task(1), REPO)
+
     def test_planner_constant_dedup_preserves_initial_facts_and_rejects_type_change(self):
         domain = "(define (domain x) (:constants wrench jack - tool))"
         problem = "(define (problem p) (:objects wrench jack - tool boot - container) (:init (in jack boot)))"
@@ -435,15 +459,28 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(plan["validation"]["success"], 1)
         self.assertEqual(plan["validation"]["invalid_actions"], 0)
         self.assertGreater(len(plan["actions"]), 0)
+        self.assertNotEqual(plan["expert_execution"]["pid"], os.getpid())
 
     def test_barman_expert_hyphen_actions_replay_without_nltk(self):
         rows, _ = pddl_inventory(REPO)
         row = next(r for r in rows if r["id"] == "pddl:barman:p01")
-        with redirect_stdout(io.StringIO()), mock.patch("nltk.word_tokenize", side_effect=AssertionError("NLTK is not required")):
+        with redirect_stdout(io.StringIO()):
             plan = make_expert(row, REPO)
+            # The expert now runs in a child. Verify the action parser's NLTK
+            # independence here by replaying the returned plan in this process.
+            episode = Episode(row, REPO)
+            try:
+                with mock.patch("nltk.word_tokenize", side_effect=AssertionError("NLTK is not required")):
+                    for action in plan["actions"]:
+                        episode.step(action)
+                self.assertTrue(episode.won)
+                self.assertEqual(episode.invalid_actions, 0)
+            finally:
+                episode.close()
         self.assertEqual(plan["validation"]["success"], 1)
         self.assertEqual(plan["validation"]["invalid_actions"], 0)
         self.assertTrue(any("fill-shot" in action for action in plan["actions"]))
+        self.assertNotEqual(plan["expert_execution"]["pid"], os.getpid())
 
     def test_tyreworld_expert_replays_after_duplicate_constant_normalization(self):
         rows, _ = pddl_inventory(REPO)
@@ -453,6 +490,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(plan["validation"]["success"], 1)
         self.assertEqual(plan["validation"]["invalid_actions"], 0)
         self.assertEqual(plan["planner_input_normalization"]["removed_duplicate_objects"], ["jack", "pump", "wrench"])
+        self.assertNotEqual(plan["expert_execution"]["pid"], os.getpid())
 
 
 if __name__ == "__main__":

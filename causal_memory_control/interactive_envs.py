@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import importlib
+import json
+import os
 from pathlib import Path
 import re
+import subprocess
 import sys
+import tempfile
 import types
 
 from .interactive_data import digest
@@ -225,8 +229,50 @@ class Episode:
         self.env.close()
 
 
-def make_expert(task, repo, *, max_steps=200):
-    """Symbolic/existing handcoded experts only, replayed through native syntax."""
+def make_expert(task, repo, *, max_steps=200, timeout=120):
+    """Generate and verify one expert plan in a fresh, bounded Python process.
+
+    Fast Downward copies and dlopens its C++ library, then manually dlcloses it.
+    Repeating that lifecycle in one Linux process can crash inside LoadLibrary.
+    Keep native-library state out of callers, including the unittest process.
+    """
+    with tempfile.TemporaryDirectory(prefix="cmc-expert-") as directory:
+        result_path = Path(directory) / "result.json"
+        command = [sys.executable, "-X", "faulthandler", "-m", __package__ + ".interactive_envs",
+                   "--expert-output", str(result_path)]
+        try:
+            completed = subprocess.run(command, cwd=Path(__file__).resolve().parents[1],
+                input=json.dumps({"task": task, "repo": str(Path(repo).resolve()), "max_steps": max_steps}),
+                capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"expert subprocess timed out after {timeout}s: {task['id']}") from exc
+        if completed.returncode:
+            raise RuntimeError(f"expert subprocess failed: {task['id']}; returncode={completed.returncode}\n"
+                               + completed.stdout[-4000:] + completed.stderr[-8000:])
+        try:
+            result = json.loads(result_path.read_text())
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"expert subprocess produced no valid result: {task['id']}\n"
+                               + completed.stderr[-8000:]) from exc
+    if (not isinstance(result, dict) or result.get("task_id") != task["id"]
+            or result.get("validation", {}).get("success") != 1
+            or result.get("validation", {}).get("invalid_actions") != 0
+            or not result.get("actions")):
+        raise ValueError(f"expert subprocess produced an invalid verified plan: {task['id']}")
+    result["expert_execution"]["stdout"] = completed.stdout
+    result["expert_execution"]["stderr"] = completed.stderr
+    return result
+
+
+_EXPERT_STARTED = False
+
+
+def _make_expert_once(task, repo, *, max_steps=200):
+    """Single-use entry for the CLI or an existing bounded expert_one worker."""
+    global _EXPERT_STARTED
+    if _EXPERT_STARTED:
+        raise RuntimeError("an expert process can handle only one task; call make_expert for a fresh process")
+    _EXPERT_STARTED = True
     episode = Episode(task, repo, max_steps, expert=task["dataset"] == "alfworld")
     try:
         actions = []
@@ -282,6 +328,18 @@ def make_expert(task, repo, *, max_steps=200):
                 "actions": actions, "target": "\n".join(actions), "trajectory": episode.trace,
                 "validation": episode.result(), "supervision": "initial_public_context_full_successful_plan_ce_v1",
                 "planner_input_normalization": planner_normalization,
+                "expert_execution": {"process_policy": "one_expert_task_per_process_v1", "pid": os.getpid()},
                 "hidden_expert_state_exposed_at_runtime": False}
     finally:
         episode.close()
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="One isolated, verified expert episode")
+    parser.add_argument("--expert-output", required=True, type=Path)
+    arguments = parser.parse_args()
+    request = json.load(sys.stdin)
+    verified = _make_expert_once(request["task"], request["repo"], max_steps=request["max_steps"])
+    arguments.expert_output.write_text(json.dumps(verified, ensure_ascii=False, allow_nan=False))

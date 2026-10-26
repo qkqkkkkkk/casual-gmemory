@@ -195,6 +195,12 @@ python -m causal_memory_control.interactive_report \
 
 ## 验证与当前边界
 
+2026-10-26 服务器故障：同一 unittest 进程依次生成多个 PDDL 专家计划时，在 Tyreworld 的 `fast_downward.load_lib → ctypes.LoadLibrary` 发生 SIGSEGV；此前 Barman 和 Blockworld 计划已成功。共享库反复加载/卸载是当前怀疑的触发条件，具体 Linux 加载器原因尚未确认。`make_expert` 现改为每次启动独立、带超时和 faulthandler 的专家进程，原生加载库不进入测试主进程。正式 `expert_one` 本来就是有界的独立进程，继续直接执行单任务入口，并拒绝在同进程重复生成专家；监督定义与成功回放要求不变。崩溃或超时不会转换为 CE target。
+
+该故障日志还包含两个先发生的 ALFWorld inventory/split 测试 `ERROR`；它们的 traceback 在 SIGSEGV 后未能汇总。可先单独运行 `python -m unittest causal_memory_control.tests.test_interactive_benchmark.DataTests -v`，获取数据路径/划分的具体错误。不能将这些错误随原生库修复一并视为已解决。更新源码后若输出目录已有锁定 manifest，须使用新的输出目录，保留原结果。
+
+本次隔离修改后，本地完整 24 项测试通过，包括 Barman、Blockworld、Tyreworld 在独立进程内的真实规划和成功回放，以及 SIGSEGV/超时/无结果的拒绝路径。尚未在发生崩溃的 Linux 服务器上复测。
+
 本地已通过：新增 14 项测试（包括真实原生 MacNet 配假 LLM、support 事务恢复、真实 PDDL 规划回放、CE 符号、划分、防泄漏、缓存/动作冲突、八策略编排与只读 QA 导入），旧入口 33 项回归测试；全部 60 个 PDDL 问题 reset/目标核查；两个 ALFWorld 专家样例。测试和这些 CPU 环境检查没有调用付费 API。
 
 ```bash
