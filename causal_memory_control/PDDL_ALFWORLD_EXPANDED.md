@@ -1,6 +1,6 @@
 # 扩大实验 v2：PDDL 五折与 ALFWorld 更多独立任务
 
-2026-10-26 新增的九策略版本见文末“v3：增加 Local–Global + Team U + semantic dedup”。原 v2 八策略命令和结果保留。
+当前用户选择跳过 CE，只运行其余八策略，见文末“v8：只跑其余八策略，跳过 CE”。终端直接输出与 tyreworld 超时修复见“v7：主程序直接输出进度与 tyreworld 专家”。先前修复和九策略命令保留。
 
 用户于 2026-10-23 确认：PDDL 保留原 60 题做五折；ALFWorld 使用 support 100 / fit 800 / dev 200，额外预留 500 题测评，并独立保留 134 题 unseen 测评。旧 ST、QA 代码、旧 checkpoint 和结果不变。小规模 v1 的运行说明保留在 `PDDL_ALFWORLD_BENCHMARK.md`；此文是扩大版的命令。
 
@@ -197,3 +197,224 @@ CMC_EXPERT_TEST_TIMEOUT=600 python -X faulthandler -m unittest \
 ```
 
 正式实验若采用每任务 600 秒，应在定义数组时显式加入 `--expert-timeout 600`，并先运行 `--stage experts` 验证全部 fit/dev 专家，成功后再开始 support 和诊断 LLM 采集。若已生成旧 manifest，本次源码/超时设置变更须选新输出目录（如 `pddl_alfworld_gate_expanded_v4_team_u`）；保留旧产物。增加等待时间不会放宽成功回放、非法动作数或 CE target 验证。若仍超时，查看异常中的最后一个 `expert_phase` 和 faulthandler 栈，再根据实际阶段排查。
+
+## v6：barman 专家与实时进度条（2026-10-27）
+
+服务器 v5 的实际异常已定位到 `pddl:barman:p09`：环境/依赖初始化约 142 秒，之后停在 `planner_search`，最终触发包含整个子进程生命周期的 600 秒硬超时。日志中的每次 `Timeout (0:01:00)` 是 faulthandler 的周期栈输出，最终的 `subprocess.TimeoutExpired` 才是任务失败。增加 GPU 显存无法加速这个 CPU 符号搜索。
+
+新增可选参数 `--pddl-expert barman_constructive`。barman 按当前问题的配方和正向 contains 目标构造符号动作，用目标 shot 量取配料、倒入 shaker、清洗 shot、摇匀并倒回目标 shot。每次处理后恢复空净 shaker，已经满足的目标 shot 不再使用。构造过程不搜索备用 shot 的排列，也不改变原域、问题、目标或动作语义。生成的每一步仍通过原生动作解释器和环境执行；仅成功且非法动作数为零的计划才保存、进入 fit/dev 的 CE 标签。其他三个 PDDL 域仍用 Fast Downward；ALFWorld 仍用原手写文本专家。
+
+默认 `--pddl-expert fast_downward` 保留旧入口。新记录的 `source=barman_constructive_symbolic_v1`、执行后端、动作、原生轨迹、成功验证和源码哈希区分两种监督来源；不把新计划称为 Fast Downward 输出，也不与旧 CE 标签混用。目标依旧是完整成功计划的冻结 Qwen CE proxy，不是最短计划、逐步观测 CE 或真实团队 reward。构造计划的长度可能与旧规划器不同，应在报告中保留此监督来源说明。
+
+本地完整回归 36 项通过，包括全部 20 个注册 barman 问题的成功原生回放、零非法动作、p09 独立专家子进程以及错误状态保留任务/折/日志位置。未运行正式 Qwen 训练、完整团队评测或旧 QA 实验。服务器还需运行新后端的原生回放检查。
+
+新增文件：`interactive_barman.py`、`watch_interactive_progress.py`、`run_interactive_expanded_v6.sh`、`tests/test_interactive_barman.py`。同时更新 `interactive_envs.py`、`interactive_worker.py`、`run_interactive_gate_benchmark.py`、`tests/test_interactive_benchmark.py` 和本文。原 FEVER/HotpotQA、旧 gate 和 CE 核心未修改。因为专家后端和登记源码改变，启动脚本使用新目录 `pddl_alfworld_gate_expanded_v6_barman`，保留 v5 数据与日志。
+
+服务器同步代码后执行；先确认旧实验进程已退出，再更新源码：
+
+```bash
+cd /mnt/mydata/hjq/casual-gmemory
+conda activate gmemory
+
+CMC_EXPERT_TEST_TIMEOUT=600 python -m unittest \
+  causal_memory_control.tests.test_interactive_barman -v
+
+bash causal_memory_control/run_interactive_expanded_v6.sh plan
+```
+
+启动脚本完整定义九策略、PDDL 五折、ALFWorld 100/800/200+500+134、预算、种子与设备参数。默认 GPU 0、端点 11442；HF teacher 使用已找到的离线仓库缓存，并固定到 `a09a35458c702b33eeacc393d103063234e8bc28`，不重新下载。使用 Linux `flock`，锁文件在结果目录外；检测到同一目录已有运行时自动转为查看其进度，不再启动第二份实验。检查和实际加锁之间若遇到并发启动，实际加锁失败仍退出 75。脚本不依赖之前终端的数组或变量。可用 `CMC_INTERACTIVE_GPU`、`CMC_INTERACTIVE_ENDPOINT`、`CMC_INTERACTIVE_OUTPUT`、`CMC_INTERACTIVE_GENERATOR`、`CMC_INTERACTIVE_GENERATOR_REVISION`、`CMC_INTERACTIVE_PYTHON` 显式覆盖；实验配置改变时选新输出目录。
+
+前台运行会在同一终端自动打印阶段、数据集/折、任务计数进度条、当前任务和新增阶段日志，无需再打开查看终端。此时 Ctrl+C 会中断前台实验：
+
+```bash
+bash causal_memory_control/run_interactive_expanded_v6.sh all
+```
+
+后台启动一次，启动日志放在结果目录外：
+
+```bash
+nohup bash causal_memory_control/run_interactive_expanded_v6.sh all \
+  >> /mnt/mydata/hjq/pddl_alfworld_v6_barman.launch.log 2>&1 &
+echo "实验 PID：$!"
+```
+
+若已在后台启动，在当前终端跟随现有实验输出即可，无需重启。下面的 `follow` 只读、不加载模型、不启动第二份实验；Ctrl+C 仅退出查看，后台实验继续运行：
+
+```bash
+bash causal_memory_control/run_interactive_expanded_v6.sh follow
+```
+
+查看器也可直接运行；不加 `--stream` 时采用刷新式显示：
+
+```bash
+cd /mnt/mydata/hjq/casual-gmemory
+python causal_memory_control/watch_interactive_progress.py \
+  --output-dir causal_memory_control/results/pddl_alfworld_gate_expanded_v6_barman \
+  --stream
+```
+
+进度条是当前阶段的已保存任务/总任务数，不是总耗时比例。专家、建库、诊断和测试计数从登记 split 与已保存任务文件交叉计算，因此阶段失败后仍显示已保存工作；自动跟随各折和 ALFWorld，附带当前阶段日志。模型训练显示原有训练日志，刷新式查看也读取已记录 epoch/loss；没有可用计数时明确显示未知，不伪造百分比或 ETA。串流每秒检查变化，单个长任务每 30 秒打印一次当前进度。后台任务结束时串流自动退出；状态文件仍保留最后记录。
+
+直接运行查看器会先移除脚本目录在 `sys.path` 中的入口，避免同目录 `types.py` / `logging.py` 遮蔽 Python 标准库。查看器和启动脚本都不在实验源码哈希集合中，可以在 v6 正在运行时单独更新这两项；更新后不会重启或改变当前实验。
+
+只读查看旧 v5 的失败原因，包含已保存的完整 traceback：
+
+```bash
+python causal_memory_control/watch_interactive_progress.py \
+  --output-dir causal_memory_control/results/pddl_alfworld_gate_expanded_v5_team_u_hfcache \
+  --once
+```
+
+查看器能从旧子进程记录找回丢失的 dataset/fold。v6 父进程会直接在错误状态保留 dataset、命令和 log_path；子进程失败时保留最后的任务 ID、计数与 total。查看器文件不在 `interactive_*.py` 哈希集合中，单独添加/修改显示工具不改变实验身份。`--once` 读到 failed 时退出 1，表示已保存的实验失败，并非查看器重新启动了实验。
+
+## v7：主程序直接输出进度与 tyreworld 专家（2026-10-27）
+
+v6 的后续错误已从服务器日志确认：`pddl/fold_01` 的专家阶段在 `pddl:tyreworld:p02` 停止，已完成 35/40 题。该题的环境初始化约 4.66 秒，进入 `planner_search` 约 4.95 秒，最终耗尽 600 秒。源问题内部名为 tyreworld-9，包含 9 个轮毂及车轮，但目标只要求更换其中两个；通用搜索探索大量无关动作组合。这不是查看器的 types 导入错误，也不是 GPU 显存不足的证据。
+
+增加可选后端 `--pddl-expert barman_tyreworld_constructive`：barman 沿用 v6 构造器，tyreworld 根据初态和目标只拆卸必要轮胎，获取工具、处理紧/松螺母、顶升、拆装、归还旧轮胎及充气。blockworld/gripper 仍用 Fast Downward。保留旧 fast_downward/barman_constructive 两种选项。新 tyreworld 记录为 `source=tyreworld_constructive_symbolic_v1`；每步仍须在原生环境执行，最终 Success=1、非法动作数=0 才保存为 fit/dev 的 CE target。不承诺最短计划，不改原域、问题或目标，不把构造结果当成 Fast Downward 输出。该监督来源及其计划长度必须在结果中说明。
+
+主程序从启动起直接打印数据扫描/划分、源码和服务校验，以及十个实验阶段：专家验证 → 建库 → 诊断采集 → CE 标签 → Team U 标签 → Reward Gate 训练 → CE 训练 → Team U 训练 → 测评 → 汇总。每个数据集/折打印实际任务计数，测评附当前策略/分支，训练原有 epoch/batch 进度直接转发。百分比表示文件扫描数、任务数或阶段数，不是预计时间。子进程输出同时写入原阶段日志并转发至当前终端，包括错误与原有 tqdm 的回车刷新；无需启动查看器或打开其他终端。前台 Ctrl+C/SIGTERM 会清理本次 worker 及其专家子进程，不影响其他服务。
+
+协议、九策略、划分、seed、动作预算和 GPU/模型默认值不变。由于专家来源和登记代码变化，v7 默认新目录为 `pddl_alfworld_gate_expanded_v7_native_progress`；不得修改旧 manifest 来恢复 v6。查看器的直接入口也已修复 types.py/logging.py 遮蔽标准库的问题，仍可用于只读检查旧结果。
+
+### 本地打包与自行上传
+
+`interactive_v7_upload_files.txt` 精确列出需要同步的 17 个文件，包含说明、测试、既有 barman 后端和独立进度工具；没有数据、模型、旧结果、SQLite 或 FEVER/HotpotQA 修改。本次 v7 不自动上传或启动服务器实验。
+
+在本地 Mac 的项目根目录执行：
+
+```bash
+cd /Users/xiaobaobei/gmemory
+COPYFILE_DISABLE=1 tar -czf /private/tmp/gmemory_interactive_v7_fix.tar.gz \
+  -T causal_memory_control/interactive_v7_upload_files.txt
+scp /private/tmp/gmemory_interactive_v7_fix.tar.gz \
+  szu:/mnt/mydata/hjq/casual-gmemory/
+```
+
+`szu` 使用此前已验证的本地 SSH 别名。先确认下面的旧实验进程检查没有结果，再在服务器解压；不要在旧实验运行时更换源码：
+
+```bash
+cd /mnt/mydata/hjq/casual-gmemory
+conda activate gmemory
+pgrep -afu "$(id -u)" 'causal_memory_control[.](run_interactive_gate_benchmark|interactive_worker|interactive_envs)'
+
+# 上面无匹配进程后再执行：
+mkdir -p /mnt/mydata/hjq/cmc_deploy_backups
+tar -czf "/mnt/mydata/hjq/cmc_deploy_backups/before_v7_$(date +%Y%m%d_%H%M%S).tar.gz" \
+  causal_memory_control/interactive_data.py \
+  causal_memory_control/interactive_envs.py \
+  causal_memory_control/interactive_worker.py \
+  causal_memory_control/interactive_training.py \
+  causal_memory_control/interactive_team_u.py \
+  causal_memory_control/run_interactive_gate_benchmark.py
+tar -xzf gmemory_interactive_v7_fix.tar.gz
+```
+
+### 清理两次失败实验（可选，删除后不能从这些结果恢复）
+
+以下只清理已定位失败的 v5/v6 结果、其启动日志和锁文件。若任何此类实验仍有主/子进程，命令会跳过删除；有匹配进程时先按 PID 检查归属，不能直接删除仍被写入的目录。不要停止 Ollama。FEVER/HotpotQA、其他 results 和 data 均不在删除清单中。
+
+```bash
+cd /mnt/mydata/hjq/casual-gmemory
+if pgrep -afu "$(id -u)" 'causal_memory_control[.](run_interactive_gate_benchmark|interactive_worker|interactive_envs)'; then
+  echo "仍有实验进程：未删除。先确认这些进程属于哪次实验。"
+else
+  cmc_check_status=$?
+  if [ "$cmc_check_status" -eq 1 ]; then
+    rm -rf -- \
+      causal_memory_control/results/pddl_alfworld_gate_expanded_v5_team_u_hfcache \
+      causal_memory_control/results/pddl_alfworld_gate_expanded_v6_barman
+    rm -f -- \
+      /mnt/mydata/hjq/pddl_alfworld_v5_team_u_hfcache.launch.log \
+      /mnt/mydata/hjq/pddl_alfworld_v6_barman.launch.log \
+      /mnt/mydata/hjq/pddl_alfworld_v5_team_u_hfcache.lock \
+      causal_memory_control/results/pddl_alfworld_gate_expanded_v5_team_u_hfcache.lock \
+      causal_memory_control/results/pddl_alfworld_gate_expanded_v6_barman.lock
+    echo "已删除这两次失败实验及其启动日志。"
+  else
+    echo "进程检查失败：未删除。"
+  fi
+fi
+```
+
+### 验证和同一终端运行
+
+```bash
+cd /mnt/mydata/hjq/casual-gmemory
+conda activate gmemory
+
+CMC_EXPERT_TEST_TIMEOUT=600 python -X faulthandler -m unittest \
+  causal_memory_control.tests.test_interactive_barman \
+  causal_memory_control.tests.test_interactive_tyreworld \
+  causal_memory_control.tests.test_interactive_progress -q
+
+bash causal_memory_control/run_interactive_expanded_v7.sh plan
+bash causal_memory_control/run_interactive_expanded_v7.sh smoke
+```
+
+检查模型/数据、服务、资源及上述输出后，正式运行一次：
+
+```bash
+set -o pipefail
+bash causal_memory_control/run_interactive_expanded_v7.sh all 2>&1 \
+  | tee /mnt/mydata/hjq/pddl_alfworld_v7_native_progress.launch.log
+```
+
+不用 nohup 或 `&`，进度立即显示在当前终端。终端关闭可能中断前台任务；需要断线后保留可先进入自己的 tmux 会话后运行同一条命令。同配置再次执行恢复 v7 已保存任务；不从 v5/v6 导入不同后端的 CE 计划或旧标签。更改 GPU 可在命令前设置 `CMC_INTERACTIVE_GPU`，服务仍须对应指定 endpoint。
+
+本地最终回归 43 项通过（88.263 秒）：覆盖旧交互基准与 Team U、全部 20 个 barman 和 10 个 tyreworld 原生回放、p09/p02 独立专家子进程、终端输出在子进程退出前到达、原始日志完整保留、失败码透传、终止时清理专家后代、直接查看器入口，以及采样进度不改变任务划分。完整 v7 plan-only 已验证九策略、五折和 ALFWorld 两组测评规模，无写入/模型加载/服务调用。未启动 v7 的正式训练或测评，未重跑 FEVER/HotpotQA；这些测试不是实际策略成绩。
+
+## v8：只跑其余八策略，跳过 CE
+
+用户于 2026-10-27 选择先不跑 CE 方法。本轮使用 `--include-local-global-team-u --exclude-ce`，保留：Always Use、Always Global Drop、Random Drop、Semantic Linear、Semantic MLP、Semantic ST、Local–Global + Team U + semantic dedup、Oracle，共八行。旧 CE 代码和默认九策略能力保留；未传 `--exclude-ce` 的原入口行为保留。
+
+本轮阶段为：数据采样/划分与校验 → 建立 support 记忆库 → 诊断采集 → Team U 标签核验 → Reward Gate 训练 → Team U 训练 → 测评 → 汇总。正式七阶段中的 `experts`、`labels`、`train_csm` 完全不执行，smoke 同样不生成专家计划。手动要求这些禁用阶段会直接报配置错误。Team U 仍只用同题配对的真实团队 Success 差，保留原来的完整候选列表评分、后置语义去重和 `U>0` 保留规则。
+
+本轮不需要 HF Qwen CE 权重，也不加载 CE scorer；Ollama 的 qwen2.5:7b 仍用于交互生成，BERT 与 MiniLM 仍需已备好的本地缓存。八策略的模型/报告检查不要求 csm_st checkpoint。报告只输出八行，并登记 `ce_enabled=false`。PDDL 五折及 ALFWorld 100/800/200+500+134、split seed、团队配置、随机种子和其他预算不变；ALFWorld 134 unseen 与额外 500 继续分开报告。
+
+上限：support 团队运行 140、诊断团队运行 16,800、测试团队运行 6,246（PDDL 540、ALFWorld 5,706），专家任务和 CE forward 都为零。Team U 与已有动作继续复用缓存；这不是 API 请求数量或工时估计。新目录 `pddl_alfworld_gate_expanded_v8_no_ce` 区分此前失败的 v5/v6 和九策略 v7，不编辑旧 manifest、不继承旧 CE 标签。
+
+本地手动上传包列出 22 个确定文件，清单为 `interactive_v8_upload_files.txt`。保留 v7 构造器用于以后选择恢复 CE，但 v8 不调用。无数据、模型、结果、FEVER/HotpotQA 改动；不自动上传。
+
+```bash
+# 本地 Mac 执行：
+cd /Users/xiaobaobei/gmemory
+COPYFILE_DISABLE=1 tar -czf /private/tmp/gmemory_interactive_v8_no_ce.tar.gz \
+  -T causal_memory_control/interactive_v8_upload_files.txt
+scp /private/tmp/gmemory_interactive_v8_no_ce.tar.gz szu:/mnt/mydata/hjq/casual-gmemory/
+```
+
+在服务器确认旧主/子进程均无匹配后备份代码并解压；上文的“清理两次失败实验”命令仍可使用，只删除 v5/v6，不删除 v8：
+
+```bash
+cd /mnt/mydata/hjq/casual-gmemory
+conda activate gmemory
+pgrep -afu "$(id -u)" 'causal_memory_control[.](run_interactive_gate_benchmark|interactive_worker|interactive_envs)'
+
+# 无匹配进程后执行：
+mkdir -p /mnt/mydata/hjq/cmc_deploy_backups
+tar -czf "/mnt/mydata/hjq/cmc_deploy_backups/before_v8_$(date +%Y%m%d_%H%M%S).tar.gz" \
+  causal_memory_control/*.py
+tar -xzf gmemory_interactive_v8_no_ce.tar.gz
+
+python -X faulthandler -m unittest \
+  causal_memory_control.tests.test_interactive_no_ce \
+  causal_memory_control.tests.test_interactive_progress -q
+
+bash causal_memory_control/run_interactive_expanded_v8.sh plan
+bash causal_memory_control/run_interactive_expanded_v8.sh smoke
+```
+
+只读计划应显示 `ce_enabled=false`、8 个 policies、7 个 stages、`expert_episodes=0`、两类 CE forward 上限=0，并保留 local_global_team_u。smoke 验证原环境和 no-DROP parity，`expert_check=skipped_ce_excluded` 是预期状态。
+
+正式在当前终端运行一次，自动显示数据采样、阶段、任务、策略和训练进度并保存日志：
+
+```bash
+set -o pipefail
+bash causal_memory_control/run_interactive_expanded_v8.sh all 2>&1 \
+  | tee /mnt/mydata/hjq/pddl_alfworld_v8_no_ce.launch.log
+```
+
+不要改回 v7 启动脚本，也不用 nohup 或 `&`；终端直接显示进度。需要断线保留时先进入 tmux 再运行。设备默认 GPU 0、Ollama 11442；`CMC_INTERACTIVE_GPU` / `CMC_INTERACTIVE_ENDPOINT` 可按已核实的实际服务设置。正式结果仍需运行后生成，本次没有新增策略实测成绩。
+
+v8 最终本地回归 47 项通过（88.377 秒），包括八策略配置/报告/恢复不要求 CE checkpoint、诊断 Team U 使用原分支、smoke 不调用专家、显式 CE 阶段拒绝，以及旧九策略入口继续工作。完整 v8 只读计划确认八行、七阶段、专家与 CE forward 为零、测试 schedule 上限合计 6,246、输出目录未创建。未运行服务器正式实验，也未执行 FEVER/HotpotQA 的训练或测评。

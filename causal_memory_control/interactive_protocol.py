@@ -12,7 +12,8 @@ STAGES = ("experts", "support", "collect", "labels", "train_reward", "train_csm"
 
 
 def policies(config):
-    return POLICIES[:-1] + (TEAM_U_POLICY,) + POLICIES[-1:] if config.get("include_local_global_team_u") else POLICIES
+    selected = POLICIES[:-1] + (TEAM_U_POLICY,) + POLICIES[-1:] if config.get("include_local_global_team_u") else POLICIES
+    return tuple(p for p in selected if p[0] != "csm_st" or not config.get("exclude_ce"))
 
 
 def learned_methods(config):
@@ -20,9 +21,9 @@ def learned_methods(config):
 
 
 def stages(config):
-    if not config.get("include_local_global_team_u"):
-        return STAGES
-    return (*STAGES[:4], "labels_team_u", *STAGES[4:6], "train_team_u", *STAGES[6:])
+    selected = ((*STAGES[:4], "labels_team_u", *STAGES[4:6], "train_team_u", *STAGES[6:])
+                if config.get("include_local_global_team_u") else STAGES)
+    return tuple(s for s in selected if not config.get("exclude_ce") or s not in ("experts", "labels", "train_csm"))
 
 
 def training_options(config, *, team_u=False):

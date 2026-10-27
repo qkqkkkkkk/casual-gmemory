@@ -164,6 +164,7 @@ def report(config, qa_root=None):
         checkpoints = (cv_provenance["checkpoints_sha256"] if cv_provenance else
             {m: sha(root / m / "checkpoint.json") for m in learned_methods(config)})
         summaries[name] = {"schema": "interactive-comparison-v1", "metric": "success",
+            "ce_enabled": not config.get("exclude_ce", False),
             "simulation": bool(config.get("simulation", False)),
             "aggregation": "task-weighted_micro_mean; group macro also reported",
             "bootstrap": "paired_cluster_percentile_2000_resamples_seed71_by_scene_or_problem",
@@ -176,7 +177,7 @@ def report(config, qa_root=None):
             "evaluation_design": "five_fold_out_of_fold" if cv_provenance else "fixed_holdout",
             "config_digest": digest(config), "policies": result,
             "budgets": {"reward_gates": "dev-selected 0 or 1 SINGLE DROP", "random": "one SINGLE DROP per seed",
-                "csm": "unlimited; keep iff predicted CI>0 after dedup",
+                "csm": ("not enabled" if config.get("exclude_ce") else "unlimited; keep iff predicted CI>0 after dedup"),
                 "local_global_team_u": ("unlimited; full-list U scoring then dedup; keep iff U>0"
                                         if config.get("include_local_global_team_u") else "not enabled"),
                 "oracle": "KEEP ALL + every SINGLE DROP + DROP ALL; excludes arbitrary CSM/Team U subsets"},

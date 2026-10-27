@@ -64,7 +64,9 @@ def reward_train(config, name):
             "semantic_st": lambda: STUtilityEstimator(**kwargs, hidden_sizes=(128, 64), epochs=10,
                 beta=0.01, device=config["train_device"]),
         }
-        for method, factory in factories.items():
+        from .interactive_progress import show_progress
+        for number, (method, factory) in enumerate(factories.items()):
+            show_progress("Reward Gate 训练", number, len(factories), method)
             target = root / method
             target.mkdir(exist_ok=True)
             checkpoint = target / "checkpoint.json"
@@ -72,6 +74,7 @@ def reward_train(config, name):
                 r["task_id"]: sha(root / "diagnostic/tasks" / (digest(r["task_id"]) + ".json")) for r in rows}}
             locked(target / "inputs.json", provenance)
             if checkpoint.exists():
+                show_progress("Reward Gate 训练", number+1, len(factories), method + " 已有 checkpoint")
                 continue
             estimator = factory()
             if not estimator.fit(fit, progress=True):
@@ -92,6 +95,7 @@ def reward_train(config, name):
                 "contrastive_pairs": getattr(estimator, "contrastive_pairs", None)})
             save(target / "loss_history.json", {"history": getattr(estimator, "loss_history", None),
                 "note": "unchanged legacy linear/MLP trainers do not expose epoch loss; ST records it"})
+            show_progress("Reward Gate 训练", number+1, len(factories), method)
     finally:
         encoder.close()
 
@@ -121,7 +125,11 @@ def label_plan(row, scorer):
 
 
 def label_parts(rows, root, scorer):
+    from .interactive_progress import show_progress
+
     result = []
+    title = "CE 标签 / " + Path(root).name
+    show_progress(title, 0, len(rows))
     for index, row in enumerate(rows):
         path = Path(root) / (digest(row["id"]) + ".json")
         if path.exists():
@@ -135,12 +143,15 @@ def label_parts(rows, root, scorer):
             labelled = label_plan(row, scorer)
             save(path, labelled)
         result.append(labelled)
+        show_progress(title, index+1, len(rows), str(row["id"]))
     save(Path(root).parent / (Path(root).name + "_progress.json"), {"status": "completed", "total": len(rows),
         "new_forwards": scorer.calls, "cache_hits": getattr(scorer, "hits", 0)})
     return result
 
 
 def ce_labels(config, name):
+    if config.get("exclude_ce"):
+        raise ValueError("CE labeling is disabled in this experiment")
     from .csm_st_data import Deduplicator, intervention_plan, write_rows
     from .csm_st_scoring import CachedCEScorer, HuggingFaceCEScorer
     from .csm_st_worker import dedup_identity
@@ -223,6 +234,8 @@ def ce_labels(config, name):
 
 
 def csm_train(config, name):
+    if config.get("exclude_ce"):
+        raise ValueError("CE training is disabled in this experiment")
     from .csm_st_data import read_rows
     from .csm_st_model import CSMConfig
     from .csm_st_training import train

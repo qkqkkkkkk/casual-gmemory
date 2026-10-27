@@ -54,7 +54,7 @@ def files_identity(root):
             if p.is_file() and not p.name.endswith(("-shm", "-wal"))}
 
 
-def pddl_inventory(repo):
+def pddl_inventory(repo, *, progress=None):
     repo = Path(repo)
     root = repo / "tasks/envs/pddl_env/pddlgym/pddl"
     label = repo / "data/pddl/test.jsonl"
@@ -63,6 +63,8 @@ def pddl_inventory(repo):
     for row in annotations:
         grouped[row["additional_info"]["subtask"]].append(row)
     result = []
+    if progress:
+        progress("数据采样 / PDDL 扫描", 0, len(annotations))
     for domain in DOMAINS:
         problems = sorted((root / domain).glob("*.pddl"))  # Native registration is lexicographic.
         if len(problems) != len(grouped[domain]):
@@ -80,10 +82,12 @@ def pddl_inventory(repo):
                           str((root / (domain + '.pddl')).relative_to(repo)): sha(root / (domain + '.pddl'))},
                 "config": {"game_name": domain, "problem_index": index,
                            "difficulty": annotation["difficulty"]}})
+            if progress:
+                progress("数据采样 / PDDL 扫描", len(result), len(annotations), result[-1]["id"])
     return result, {str(label.relative_to(repo)): sha(label)}
 
 
-def alf_inventory(repo):
+def alf_inventory(repo, *, progress=None):
     repo = Path(repo)
     source = repo / "data/alfworld/alfworld_tasks_suffix.json"
     tests = json.loads(source.read_text())
@@ -93,7 +97,11 @@ def alf_inventory(repo):
     paths = sorted((repo / "data/alfworld/json_2.1.1/train").rglob("game.tw-pddl"))
     paths += [repo / p for p in test_map]
     result = []
-    for path in paths:
+    if progress:
+        progress("数据采样 / ALFWorld 扫描", 0, len(paths))
+    for index, path in enumerate(paths):
+        if progress:
+            progress("数据采样 / ALFWorld 扫描", index, len(paths), str(path.parent.name))
         rel = str(path.relative_to(repo))
         traj = path.with_name("traj_data.json")
         data = json.loads(traj.read_text())
@@ -113,6 +121,8 @@ def alf_inventory(repo):
                        "task_type": TYPES[task_type]}})
     if sum(r["official_split"] != "train" for r in result) != len(tests):
         raise ValueError("ALFWorld test inventory incomplete")
+    if progress:
+        progress("数据采样 / ALFWorld 扫描", len(paths), len(paths), f"有效任务 {len(result)}")
     return result, {str(source.relative_to(repo)): sha(source)}
 
 
@@ -216,10 +226,10 @@ def pddl_cross_validation(rows, seed=71):
     return folds
 
 
-def inventory(repo, datasets, seed=71, alf_counts=(50, 80, 20), *, alf_heldout=0, pddl_folds=1):
+def inventory(repo, datasets, seed=71, alf_counts=(50, 80, 20), *, alf_heldout=0, pddl_folds=1, progress=None):
     experiments = {}
     for name in datasets:
-        rows, sources = (pddl_inventory if name == "pddl" else alf_inventory)(repo)
+        rows, sources = (pddl_inventory if name == "pddl" else alf_inventory)(repo, progress=progress)
         split = make_split(rows, name, seed, alf_counts, alf_heldout=alf_heldout)
         chosen = set(sum(split.values(), []))
         experiments[name] = {"tasks": [r for r in rows if r["id"] in chosen], "split": split,
@@ -237,6 +247,14 @@ def inventory(repo, datasets, seed=71, alf_counts=(50, 80, 20), *, alf_heldout=0
                 "primary_test_ids": unseen,
                 "test_cohorts": {"valid_unseen": unseen,
                     "train_scene_holdout": sorted(set(split["test"]) - set(unseen))}})
+        if progress:
+            selected = experiments[name]
+            counts = ", ".join(f"{part}={len(ids)}" for part, ids in selected["split"].items())
+            if "cv_splits" in selected:
+                counts = f"{len(selected['cv_splits'])} 折，每折 " + counts
+            if "test_cohorts" in selected:
+                counts += "; " + ", ".join(f"{part}={len(ids)}" for part, ids in selected["test_cohorts"].items())
+            progress("数据划分 / " + name, 1, 1, counts)
     return experiments
 
 
@@ -246,7 +264,7 @@ def dependencies():
              "textworld", "gym", "nltk", "chromadb", "openai", "fast_downward")}
 
 
-def workload(experiments, k=6, repeats=2, *, include_team_u=False):
+def workload(experiments, k=6, repeats=2, *, include_team_u=False, exclude_ce=False):
     result = {}
     for name, data in experiments.items():
         n = {part: len(ids) for part, ids in data["split"].items()}
@@ -257,10 +275,11 @@ def workload(experiments, k=6, repeats=2, *, include_team_u=False):
         result[name] = {"tasks": n, "candidate_cap": k, "diagnostic_repeats": repeats,
             "diagnostic_logical_use_drop_rows": diagnostic * k * repeats * 2,
             "diagnostic_schedules_upper_bound_shared_keep": diagnostic * (k + 1) * repeats,
-            "test_schedules_upper_bound_shared_actions": n["test"] * (k + 3 + int(include_team_u)),
-            "expert_episodes": diagnostic, "ce_original_forwards_upper_bound": diagnostic * (k + 1),
-            "ce_augmented_forwards_upper_bound": 2 * n["fit"] * (k + 1),
-            "note": "test actions KEEP + K SINGLE DROP + DROP ALL + CSM subset"
+            "test_schedules_upper_bound_shared_actions": n["test"] * (k + 2 + int(not exclude_ce) + int(include_team_u)),
+            "expert_episodes": 0 if exclude_ce else diagnostic,
+            "ce_original_forwards_upper_bound": 0 if exclude_ce else diagnostic * (k + 1),
+            "ce_augmented_forwards_upper_bound": 0 if exclude_ce else 2 * n["fit"] * (k + 1),
+            "note": "test actions KEEP + K SINGLE DROP + DROP ALL" + (" + CSM subset" if not exclude_ce else "")
                     + (" + Team U subset" if include_team_u else "") + "; LLM calls exceed schedules"}
         if include_team_u:
             result[name]["team_u_additional_test_schedules_upper_bound"] = n["test"]

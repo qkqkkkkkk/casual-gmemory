@@ -51,6 +51,39 @@ def measured(task_id="3", seed=2000, drops=()):
 
 
 class DataTests(unittest.TestCase):
+    def test_failure_retains_task_counts_and_the_parent_child_log_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            child_root = root / "pddl_folds/fold_00"
+            data = child_root / "pddl"
+            worker.progress(data, "experts", completed=7, total=40, current_task="pddl:barman:p09")
+            worker.progress(data, "experts", status="failed")
+            state = json.loads((data / "progress.json").read_text())
+            self.assertEqual((state["completed"], state["total"], state["current_task"]),
+                             (7, 40, "pddl:barman:p09"))
+            worker.progress(data, "experts", completed=7, current_task="pddl:barman:p09")
+            self.assertEqual(json.loads((data / "progress.json").read_text())["status"], "running")
+            worker.progress(data, "experts", status="completed")
+            self.assertEqual(json.loads((data / "progress.json").read_text())["completed"], 40)
+            config = {"output_dir": str(root), "endpoint": "mock://offline", "model": "mock",
+                      "experiments": {"pddl": {}}}
+            save(root / "benchmark_manifest.json", {**config, "model_identity": {}})
+            child = {**config, "output_dir": str(child_root)}
+            args = SimpleNamespace(plan_only=False, output_dir=root, stage="experts", repo=REPO)
+            with mock.patch.object(cli, "parse_args", return_value=args), \
+                 mock.patch.object(cli, "configuration", return_value=config), \
+                 mock.patch.object(cli, "plan", return_value={}), \
+                 mock.patch.object(cli, "dataset_jobs", return_value=[("pddl/fold_00", child)]), \
+                 mock.patch("causal_memory_control.interactive_runtime.model_identity", return_value={}), \
+                 mock.patch.object(cli, "run_logged", side_effect=subprocess.CalledProcessError(1, ["worker"])), \
+                 redirect_stderr(io.StringIO()), self.assertRaises(subprocess.CalledProcessError):
+                cli.main([])
+            failure = json.loads((root / "pipeline_progress.json").read_text())
+            self.assertEqual(failure["dataset"], "pddl/fold_00")
+            self.assertEqual(failure["stage"], "experts")
+            self.assertEqual(failure["status"], "failed")
+            self.assertEqual(failure["log_path"], str(data / "logs/experts.log"))
+
     def test_real_inventory_and_selected_scene_groups(self):
         data = inventory(REPO, ["pddl", "alfworld"])
         self.assertEqual({k: len(v) for k, v in data["pddl"]["split"].items()},

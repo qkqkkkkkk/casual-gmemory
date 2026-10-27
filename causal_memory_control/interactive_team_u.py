@@ -32,7 +32,10 @@ def measured_lists(config, name):
 
     register(root / "snapshot.json")
     register(store_root / "identity.json")
-    for raw in diagnostic_lists(root, config["experiments"][name]):
+    from .interactive_progress import show_progress
+    source = diagnostic_lists(root, config["experiments"][name])
+    show_progress("Team U 标签核验", 0, len(source))
+    for number, raw in enumerate(source):
         if raw["config_digest"] != digest(config) or raw["repeats"] != config["repeats"]:
             raise ValueError("Team U diagnostic configuration/repeats changed")
         candidates = raw["candidates"]
@@ -84,6 +87,7 @@ def measured_lists(config, name):
             "team_u": [q_use - v for v in q_drop], "q_use": [q_use] * len(ids), "q_drop": q_drop,
             "paired_samples_per_candidate": [config["repeats"]] * len(ids),
             "label_type": "mean_team_reward_use_minus_single_drop"})
+        show_progress("Team U 标签核验", number+1, len(source), raw["task_id"])
     return rows, hashes
 
 

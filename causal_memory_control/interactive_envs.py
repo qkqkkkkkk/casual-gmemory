@@ -248,7 +248,7 @@ def _output_tail(value, limit):
     return (value or "")[-limit:]
 
 
-def make_expert(task, repo, *, max_steps=200, timeout=120):
+def make_expert(task, repo, *, max_steps=200, timeout=120, pddl_expert="fast_downward"):
     """Generate and verify one expert plan in a fresh, bounded Python process.
 
     Fast Downward copies and dlopens its C++ library, then manually dlcloses it.
@@ -262,7 +262,8 @@ def make_expert(task, repo, *, max_steps=200, timeout=120):
         try:
             completed = subprocess.run(command, cwd=Path(__file__).resolve().parents[1],
                 input=json.dumps({"task": task, "repo": str(Path(repo).resolve()), "max_steps": max_steps,
-                                  "traceback_interval": min(60.0, max(0.1, timeout * 0.8))}),
+                                  "traceback_interval": min(60.0, max(0.1, timeout * 0.8)),
+                                  "pddl_expert": pddl_expert}),
                 env=expert_process_environment(), capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"expert subprocess timed out after {timeout}s: {task['id']}\n"
@@ -290,11 +291,14 @@ def make_expert(task, repo, *, max_steps=200, timeout=120):
 _EXPERT_STARTED = False
 
 
-def _make_expert_once(task, repo, *, max_steps=200, traceback_interval=60):
+def _make_expert_once(task, repo, *, max_steps=200, traceback_interval=60,
+                      pddl_expert="fast_downward"):
     """Single-use entry for the CLI or an existing bounded expert_one worker."""
     import faulthandler
 
     global _EXPERT_STARTED
+    if pddl_expert not in ("fast_downward", "barman_constructive", "barman_tyreworld_constructive"):
+        raise ValueError("unknown PDDL expert backend")
     if _EXPERT_STARTED:
         raise RuntimeError("an expert process can handle only one task; call make_expert for a fresh process")
     _EXPERT_STARTED = True
@@ -315,28 +319,42 @@ def _make_expert_once(task, repo, *, max_steps=200, traceback_interval=60):
         phase("environment_ready")
         actions = []
         planner_normalization = None
+        source = "fast_downward_symbolic" if task["dataset"] == "pddl" else "alfworld_handcoded_text_expert"
         if task["dataset"] == "pddl":
-            from fast_downward import Operator, close_lib, load_lib, pddl2sas
-
             domain = task["domain"]
-            root = Path(repo) / "tasks/envs/pddl_env/pddlgym/pddl"
-            problem = next(Path(repo) / p for p in task["files"] if Path(p).parent.name == domain)
-            domain_text, problem_text, planner_normalization = planner_inputs(
-                (root / (domain + ".pddl")).read_text(), problem.read_text())
-            phase("pddl_translate")
-            _, sas = pddl2sas(domain_text, problem_text)
-            phase("planner_load")
-            lib = load_lib()
-            try:
-                phase("planner_search")
-                if not lib.solve_sas(sas.encode(), False):
-                    raise ValueError(f"planner failed: {task['id']}")
-                plan = (Operator * lib.get_last_plan_length())()
-                lib.get_last_plan(plan)
-                symbolic = [p.name for p in plan]
-            finally:
-                phase("planner_close")
-                close_lib(lib)
+            if domain == "barman" and pddl_expert in ("barman_constructive", "barman_tyreworld_constructive"):
+                from .interactive_barman import symbolic_plan
+
+                phase("barman_constructive_plan")
+                symbolic = symbolic_plan(episode.native)
+                source = "barman_constructive_symbolic_v1"
+            elif domain == "tyreworld" and pddl_expert == "barman_tyreworld_constructive":
+                from .interactive_tyreworld import symbolic_plan
+
+                phase("tyreworld_constructive_plan")
+                symbolic = symbolic_plan(episode.native)
+                source = "tyreworld_constructive_symbolic_v1"
+            else:
+                from fast_downward import Operator, close_lib, load_lib, pddl2sas
+
+                root = Path(repo) / "tasks/envs/pddl_env/pddlgym/pddl"
+                problem = next(Path(repo) / p for p in task["files"] if Path(p).parent.name == domain)
+                domain_text, problem_text, planner_normalization = planner_inputs(
+                    (root / (domain + ".pddl")).read_text(), problem.read_text())
+                phase("pddl_translate")
+                _, sas = pddl2sas(domain_text, problem_text)
+                phase("planner_load")
+                lib = load_lib()
+                try:
+                    phase("planner_search")
+                    if not lib.solve_sas(sas.encode(), False):
+                        raise ValueError(f"planner failed: {task['id']}")
+                    plan = (Operator * lib.get_last_plan_length())()
+                    lib.get_last_plan(plan)
+                    symbolic = [p.name for p in plan]
+                finally:
+                    phase("planner_close")
+                    close_lib(lib)
             phase("native_replay", planned_actions=len(symbolic))
             for command in symbolic:
                 tokens = command.strip("()").split()
@@ -368,15 +386,14 @@ def _make_expert_once(task, repo, *, max_steps=200, traceback_interval=60):
         if not actions or not episode.won or episode.invalid_actions:
             raise ValueError(f"expert trajectory failed validation: {task['id']}")
         phase("validated", successful_actions=len(actions))
-        return {"task_id": task["id"], "source": "fast_downward_symbolic" if task["dataset"] == "pddl"
-                else "alfworld_handcoded_text_expert", "task_files": task["files"],
+        return {"task_id": task["id"], "source": source, "task_files": task["files"],
                 "initial_fingerprint": episode.initial_fingerprint,
                 "query": episode.task_main, "state": episode.task_description,
                 "actions": actions, "target": "\n".join(actions), "trajectory": episode.trace,
                 "validation": episode.result(), "supervision": "initial_public_context_full_successful_plan_ce_v1",
                 "planner_input_normalization": planner_normalization,
                 "expert_execution": {"process_policy": "one_expert_task_per_process_v1", "pid": os.getpid(),
-                    "device": "cpu", "phases": phases,
+                    "device": "cpu", "phases": phases, "pddl_expert": pddl_expert,
                     "thread_limits": {key: os.getenv(key) for key in
                         ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")}},
                 "hidden_expert_state_exposed_at_runtime": False}
@@ -397,5 +414,6 @@ if __name__ == "__main__":
     arguments = parser.parse_args()
     request = json.load(sys.stdin)
     verified = _make_expert_once(request["task"], request["repo"], max_steps=request["max_steps"],
-                                 traceback_interval=request.get("traceback_interval", 60))
+                                 traceback_interval=request.get("traceback_interval", 60),
+                                 pddl_expert=request.get("pddl_expert", "fast_downward"))
     arguments.expert_output.write_text(json.dumps(verified, ensure_ascii=False, allow_nan=False))

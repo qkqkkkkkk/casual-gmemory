@@ -11,6 +11,7 @@ import sys
 
 from .interactive_data import SCHEMA, dependencies, digest, inventory, locked, save, sha, workload
 from .interactive_protocol import STAGES, policies, stages, training_options
+from .interactive_progress import InventoryProgress, STAGE_NAMES, run_logged, show_progress
 
 
 def parse_args(argv=None):
@@ -21,6 +22,8 @@ def parse_args(argv=None):
     p.add_argument("--stage", choices=("all", "smoke", *STAGES, "labels_team_u", "train_team_u"), default="all")
     p.add_argument("--include-local-global-team-u", action="store_true",
                    help="Add the ninth policy: measured Team U, Local–Global model and post-score semantic dedup")
+    p.add_argument("--exclude-ce", action="store_true",
+                   help="Omit CSM CE policy, expert plans, CE labels and CE training; keep measured Team U if selected")
     p.add_argument("--plan-only", action="store_true")
     p.add_argument("--endpoint", default="http://127.0.0.1:11434/v1")
     p.add_argument("--model", default="qwen2.5:7b")
@@ -51,6 +54,8 @@ def parse_args(argv=None):
     p.add_argument("--pddl-folds", type=int, choices=(1, 5), default=1,
                    help="1 preserves the small pilot; 5 runs independent outer-fold experiments and reports OOF results")
     p.add_argument("--expert-timeout", type=int, default=120)
+    p.add_argument("--pddl-expert", choices=("fast_downward", "barman_constructive", "barman_tyreworld_constructive"),
+                   default="fast_downward", help="Verified constructive barman/tyreworld experts; other domains use Fast Downward")
     a = p.parse_args(argv)
     a.datasets = list(dict.fromkeys(a.datasets.split(",")))
     try:
@@ -61,6 +66,8 @@ def parse_args(argv=None):
         p.error("only pddl,alfworld are supported; old datasets cannot be executed here")
     if a.stage in ("labels_team_u", "train_team_u") and not a.include_local_global_team_u:
         p.error("Team U stages require --include-local-global-team-u")
+    if a.exclude_ce and a.stage in ("experts", "labels", "train_csm"):
+        p.error("CE stages are disabled by --exclude-ce")
     if len(set(a.random_seeds)) != len(a.random_seeds) or len(a.random_seeds) < 2:
         p.error("declare at least two distinct random seeds")
     if (min(a.max_steps, a.repeats, a.alf_support, a.alf_fit, a.alf_dev, a.expert_timeout) < 1
@@ -74,12 +81,13 @@ def parse_args(argv=None):
 
 
 def configuration(args):
+    progress = None if args.plan_only else InventoryProgress()
     config = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()
               if k not in ("plan_only", "stage", "datasets", "alf_support", "alf_fit", "alf_dev")}
     config["schema"] = SCHEMA
     config["experiments"] = inventory(args.repo, args.datasets, args.split_seed,
                                      (args.alf_support, args.alf_fit, args.alf_dev), alf_heldout=args.alf_heldout_test,
-                                     pddl_folds=args.pddl_folds)
+                                     pddl_folds=args.pddl_folds, progress=progress)
     source_files = list((args.repo / "causal_memory_control").glob("interactive_*.py"))
     source_files += [Path(__file__).resolve()]
     source_files += [args.repo / p for p in (
@@ -96,7 +104,14 @@ def configuration(args):
         source_files += list((args.repo / directory).rglob("*.py"))
     source_files += [args.repo / "tasks/envs/pddl_env/pddl_env.py"]
     source_files += list((args.repo / "tasks/envs/pddl_env/pddlgym").rglob("*.py"))
-    config["code_sha256"] = {str(p.relative_to(args.repo)): sha(p) for p in sorted(set(source_files))}
+    source_files = sorted(set(source_files))
+    config["code_sha256"] = {}
+    for index, path in enumerate(source_files):
+        if progress:
+            progress("核对实验代码", index, len(source_files), str(path.relative_to(args.repo)))
+        config["code_sha256"][str(path.relative_to(args.repo))] = sha(path)
+    if progress:
+        progress("核对实验代码", len(source_files), len(source_files))
     from importlib.metadata import PackageNotFoundError, version
     config["installed_versions"] = {}
     for package in ("numpy", "torch", "transformers", "sentence-transformers", "alfworld", "textworld",
@@ -110,9 +125,11 @@ def configuration(args):
         "retrieval_boundary": "one_native_retrieval_at_episode_start_successful_and_insights_failed0",
         "oracle_actions": "KEEP ALL + every SINGLE DROP + DROP ALL",
         "random_budget": "one SINGLE DROP; matched seed prompt cache; average predeclared random seeds",
-        "csm_target": "replay_verified_successful_native_full_plan_from_public_initial_context",
-        "csm_ce": "frozen_HF_mean_continuation_CE_including_EOS_no_truncation",
-        "csm_action": "dedup_then_keep_iff_predicted_CI_gt_0_unlimited_drops",
+        "ce_enabled": not args.exclude_ce,
+        "csm_target": None if args.exclude_ce else "replay_verified_successful_native_full_plan_from_public_initial_context",
+        "pddl_expert_backend": None if args.exclude_ce else args.pddl_expert,
+        "csm_ce": None if args.exclude_ce else "frozen_HF_mean_continuation_CE_including_EOS_no_truncation",
+        "csm_action": None if args.exclude_ce else "dedup_then_keep_iff_predicted_CI_gt_0_unlimited_drops",
         "pddl_action_parser": "native_domain_arguments_hyphen_preserving_regex_v1",
         "reward_gates": "existing_semantic_linear_three_head_MLP_and_direct_U_ST_beta001_seed23",
         "test_tuning": False, "jev": False, "large_model_downloads": False,
@@ -132,17 +149,23 @@ def configuration(args):
 
 def plan(config, args):
     deps = dependencies()
+    ce = not config.get("exclude_ce")
+    if not ce:
+        deps.pop("fast_downward", None)
     return {"schema": config["schema"], "output_dir": config["output_dir"], "stage": args.stage,
         "plan_only": True, "writes_or_model_loads_or_service_calls": 0,
         "workload": workload(config["experiments"], config["successful_topk"] + config["insights_topk"], config["repeats"],
-                             include_team_u=config.get("include_local_global_team_u", False)),
+                             include_team_u=config.get("include_local_global_team_u", False), exclude_ce=not ce),
         "smoke_additional_schedules": (2*sum(len(v.get("cv_splits", [None])) for v in config["experiments"].values())
                                        if args.stage == "smoke" else 0),
         "dependencies": deps, "missing_dependencies": [k for k, v in deps.items() if not v],
         "local_model_paths_exist": {key: Path(config[key]).is_dir() for key in
-                                  ("generator_model", "encoder_model", "embedding_model")},
-        "unverified_until_runtime": ["Ollama digest/template/parameters", "HF local weights/tokenizer identity",
-            "all selected expert plans replay successfully", "all PDDL annotation goals match native registration",
+                                  (("generator_model", "encoder_model", "embedding_model") if ce
+                                   else ("encoder_model", "embedding_model"))},
+        "ce_enabled": ce,
+        "unverified_until_runtime": ["Ollama digest/template/parameters", "BERT/MiniLM local weights/tokenizer identity",
+            *(["HF CE generator identity", "all selected expert plans replay successfully"] if ce else []),
+            "all PDDL annotation goals match native registration",
             "support successes yield nonempty candidate lists", "full-snapshot retrieval/no-DROP parity"],
         "protocol": config["protocol"], "config_digest_without_service_identity": digest(config),
         "resume": "same configuration resumes task/action files; any split/model/seed/code/checkpoint change rejected",
@@ -170,6 +193,9 @@ def dataset_jobs(config, name):
 
 def main(argv=None):
     args = parse_args(argv)
+    if not args.plan_only:
+        print("[启动] PDDL / ALFWorld 对比实验；进度直接输出到当前终端，并同步保存阶段日志。", flush=True)
+        print("[数据采样] 扫描任务文件并核对固定划分（不会重新下载数据）。", flush=True)
     config = configuration(args)
     if args.plan_only:
         print(json.dumps(plan(config, args), ensure_ascii=False, indent=2))
@@ -181,18 +207,26 @@ def main(argv=None):
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     from .interactive_runtime import model_identity
 
+    show_progress("校验模型与服务", 0, 1, config["endpoint"])
     config["model_identity"] = model_identity(config["endpoint"], config["model"])
+    show_progress("校验模型与服务", 1, 1, config["model"])
     target = args.output_dir / "benchmark_manifest.json"
     if args.output_dir.exists() and not target.exists() and any(args.output_dir.iterdir()):
         raise ValueError("output directory has unrelated files; select a new independent directory")
     locked(target, config)
     save(args.output_dir / "plan.json", plan(config, args))
     selected_stages = stages(config) if args.stage == "all" else (args.stage,)
+    context = {}
     try:
-        for stage in selected_stages:
+        for stage_index, stage in enumerate(selected_stages):
+            context = {}
+            show_progress("总阶段", stage_index, len(selected_stages), STAGE_NAMES[stage])
+            print(f"\n[阶段 {stage_index + 1}/{len(selected_stages)}] {STAGE_NAMES[stage]} ({stage})", flush=True)
             if stage == "report":
+                save(args.output_dir / "pipeline_progress.json", {"stage": stage, "status": "running"})
                 from .interactive_report import report
                 report(config)
+                show_progress(STAGE_NAMES[stage], 1, 1, str(args.output_dir))
                 continue
             for name in config["experiments"]:
                 for label, job in dataset_jobs(config, name):
@@ -201,17 +235,20 @@ def main(argv=None):
                     locked(job_manifest, job)
                     command = [sys.executable, "-u", "-m", "causal_memory_control.interactive_worker",
                         "--config", str(job_manifest), "--dataset", name, "--stage", stage]
-                    save(args.output_dir / "pipeline_progress.json", {"stage": stage, "dataset": label,
-                        "command": command, "status": "running"})
                     logs = job_root / name / "logs"
                     logs.mkdir(parents=True, exist_ok=True)
-                    with (logs / (stage + ".log")).open("a") as stream:
-                        subprocess.run(command, check=True, cwd=args.repo, stdout=stream, stderr=subprocess.STDOUT)
+                    context = {"dataset": label, "command": command, "log_path": str(logs / (stage + ".log"))}
+                    save(args.output_dir / "pipeline_progress.json", {"stage": stage, **context, "status": "running"})
+                    print(f"[执行] {STAGE_NAMES[stage]} | {label} | 日志: {context['log_path']}", flush=True)
+                    run_logged(command, logs / (stage + ".log"), cwd=args.repo)
                     print(f"completed {label}/{stage}; logs: {logs / (stage + '.log')}", flush=True)
         save(args.output_dir / "pipeline_progress.json", {"status": "completed", "stages": list(selected_stages)})
-    except Exception as exc:
-        save(args.output_dir / "pipeline_progress.json", {"status": "failed", "stage": stage,
-            "error": str(exc), "details": "dataset errors/*.json and logs/<stage>.log"})
+        show_progress("总阶段", len(selected_stages), len(selected_stages), "本次命令已完成")
+    except (Exception, KeyboardInterrupt, SystemExit) as exc:
+        save(args.output_dir / "pipeline_progress.json", {"status": "failed", "stage": stage, **context,
+            "error": str(exc) or type(exc).__name__, "details": "dataset errors/*.json and logs/<stage>.log"})
+        print(f"failed {context.get('dataset', '-')}/{stage}: {exc}; "
+              f"details: {context.get('log_path', 'pipeline_progress.json')}", file=sys.stderr, flush=True)
         raise
 
 

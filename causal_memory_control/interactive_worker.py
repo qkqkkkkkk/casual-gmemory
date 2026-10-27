@@ -13,10 +13,33 @@ import uuid
 
 from .interactive_data import digest, files_identity, save, sha
 from .interactive_protocol import learned_methods, policies
+from .interactive_progress import STAGE_NAMES, show_progress
 
 
 def progress(root, stage, **fields):
-    save(Path(root) / "progress.json", {"stage": stage, **fields})
+    path = Path(root) / "progress.json"
+    previous = json.loads(path.read_text()) if path.exists() else {}
+    if previous.get("stage") != stage:
+        previous = {}
+    state = {**previous, "stage": stage, **fields}
+    if "status" not in fields:
+        state["status"] = "running"
+        state.pop("error_directory", None)
+    if state.get("status") == "completed":
+        for completed, total in (("completed", "total"), ("completed_tasks", "total_tasks")):
+            if total in state:
+                state[completed] = state[total]
+    save(path, state)
+    completed = state.get("completed_tasks", state.get("completed"))
+    total = state.get("total_tasks", state.get("total"))
+    label = Path(root).name
+    if Path(root).parent.name.startswith("fold_"):
+        label += "/" + Path(root).parent.name
+    details = [label, state.get("status", "running")]
+    if state.get("status") == "running":
+        details += [f"{key}={state[key]}" for key in
+                    ("current_task", "repeat", "single_drop_index", "current_policy") if key in state]
+    show_progress(STAGE_NAMES.get(stage, stage), completed, total, " | ".join(details))
 
 
 def verify_inputs(config, name):
@@ -63,6 +86,7 @@ def support(config, name):
             if files_identity(previous / "g-memory") != committed["files_sha256"]:
                 raise ValueError("previous support transaction changed")
             continue
+        progress(root, "support", completed=index, total=len(data["split"]["support"]), current_task=task_id)
         # Each support episode commits its own full snapshot. Failed attempts
         # remain reviewable; resume starts from the preceding committed state.
         attempt = root / "support/attempts" / (f"{index:04d}-" + uuid.uuid4().hex[:10])
@@ -106,6 +130,7 @@ def collect(config, name):
             path = root / "diagnostic/tasks" / (digest(task_id) + ".json")
             if path.exists():
                 continue
+            progress(root, "collect", completed_tasks=task_number, total_tasks=len(ids), current_task=task_id)
             uses, drops, references = [], None, []
             first = None
             for repeat in range(config["repeats"]):
@@ -140,6 +165,8 @@ def collect(config, name):
 
 
 def experts(config, name):
+    if config.get("exclude_ce"):
+        raise ValueError("CE expert collection is disabled in this experiment")
     root = Path(config["output_dir"]) / name
     data = config["experiments"][name]
     ids = sorted(data["split"]["fit"] + data["split"]["dev"])
@@ -157,6 +184,8 @@ def experts(config, name):
 
 
 def run_expert_task(config, name, task_id):
+    if config.get("exclude_ce"):
+        raise ValueError("CE expert collection is disabled in this experiment")
     from .interactive_envs import expert_process_environment
 
     command = [sys.executable, "-X", "faulthandler", "-m", "causal_memory_control.interactive_worker",
@@ -166,6 +195,8 @@ def run_expert_task(config, name, task_id):
 
 
 def expert_one(config, name, task_id):
+    if config.get("exclude_ce"):
+        raise ValueError("CE expert collection is disabled in this experiment")
     from .interactive_envs import _make_expert_once
 
     data = config["experiments"][name]
@@ -174,7 +205,8 @@ def expert_one(config, name, task_id):
     task = next(r for r in data["tasks"] if r["id"] == task_id)
     # run_expert_task already provides a fresh, bounded process for this task.
     result = _make_expert_once(task, config["repo"], max_steps=200,
-        traceback_interval=min(60.0, max(0.1, config["expert_timeout"] * 0.8)))
+        traceback_interval=min(60.0, max(0.1, config["expert_timeout"] * 0.8)),
+        pddl_expert=config.get("pddl_expert", "fast_downward"))
     save(Path(config["output_dir"]) / name / "experts" / (digest(task_id) + ".json"), result)
 
 
@@ -217,20 +249,24 @@ def evaluate(config, name):
                 completed.extend(records)
                 continue
             seed = config["evaluation_seed"]
-            progress(root, "evaluate", completed=index, total=len(data["split"]["test"]), current_task=task_id)
+            progress(root, "evaluate", completed=index, total=len(data["split"]["test"]),
+                     current_task=task_id, current_policy="KEEP_ALL")
             baseline = baseline_for(runner, store, tasks[task_id], seed)
             ids = [c["memory_id"] for c in baseline["candidates"]]
             actions = [(baseline, [])]
-            for candidate in ids:
+            for candidate_number, candidate in enumerate(ids):
+                progress(root, "evaluate", current_policy=f"SINGLE_DROP {candidate_number+1}/{len(ids)}")
                 drops = [candidate]
                 branch = execute(runner, store, tasks[task_id], seed, drops, baseline)
                 actions.append((branch, drops))
+            progress(root, "evaluate", current_policy="DROP_ALL")
             drop_all = execute(runner, store, tasks[task_id], seed, ids, baseline)
             actions.append((drop_all, ids))
             records = [policy_record(config, "always_use", baseline, baseline, []),
                        policy_record(config, "global_drop", baseline, drop_all, ids)]
             random_rows = []
             for random_seed in config["random_seeds"]:
+                progress(root, "evaluate", current_policy=f"Random Drop / seed={random_seed}")
                 rng = random.Random(int(digest([random_seed, task_id]), 16))
                 drops = rng.sample(ids, min(1, len(ids)))
                 branch = execute(runner, store, tasks[task_id], seed, drops, baseline)
@@ -249,6 +285,7 @@ def evaluate(config, name):
                 average["outcome"] = baseline["outcome"]
             records.append(average)
             for method, gate in gates.items():
+                progress(root, "evaluate", current_policy=method)
                 drops, decisions = select(gate, baseline)
                 branch = execute(runner, store, tasks[task_id], seed, drops, baseline)
                 records.append(policy_record(config, method, baseline, branch, drops, decisions))
@@ -262,6 +299,7 @@ def evaluate(config, name):
             records.append(oracle)
             save(part, records)
             completed.extend(records)
+            progress(root, "evaluate", completed=index+1, total=len(data["split"]["test"]), current_task=task_id)
         write_rows(root / "evaluation/policies.jsonl", completed)
     finally:
         runner.close()
@@ -284,9 +322,11 @@ def smoke(config, name):
         save(root / "environment.json", {"task_id": task["id"], "resets": episode.resets})
     finally:
         episode.close()
-    run_expert_task(config, name, task["id"])
-    expert = json.loads((Path(config["output_dir"]) / name / "experts" / (digest(task["id"]) + ".json")).read_text())
-    save(root / "expert.json", expert)
+    expert = None
+    if not config.get("exclude_ce"):
+        run_expert_task(config, name, task["id"])
+        expert = json.loads((Path(config["output_dir"]) / name / "experts" / (digest(task["id"]) + ".json")).read_text())
+        save(root / "expert.json", expert)
     runner = NativeRunner(config, root, root / "empty-memory")
     try:
         baseline = runner.run(task, config["evaluation_seed"])
@@ -295,7 +335,8 @@ def smoke(config, name):
         save(root / "baseline.json", baseline)
         save(root / "replay.json", replay)
         save(root / "summary.json", {"status": "passed", "task_id": task["id"],
-            "no_drop_parity": True, "expert_success": expert["validation"]["success"],
+            "no_drop_parity": True, "expert_success": expert["validation"]["success"] if expert else None,
+            "expert_check": "passed" if expert else "skipped_ce_excluded",
             "note": "empty-memory smoke only; full-snapshot candidate coverage checked during collection"})
     finally:
         runner.close()
@@ -315,8 +356,12 @@ def main(argv=None):
     config = json.loads(args.config.read_text())
     root = Path(config["output_dir"]) / args.dataset
     try:
+        if config.get("exclude_ce") and args.stage in ("experts", "expert_one", "labels", "train_csm"):
+            raise ValueError("CE stages are disabled in this experiment")
         if args.stage != "expert_one":
+            print(f"[校验输入] {args.dataset} / {STAGE_NAMES[args.stage]}：数据、源码和模型身份", flush=True)
             verify_inputs(config, args.dataset)
+            print(f"[开始执行] {args.dataset} / {STAGE_NAMES[args.stage]}", flush=True)
         if args.stage in ("labels_team_u", "train_team_u"):
             if not config.get("include_local_global_team_u"):
                 raise ValueError("Team U is not registered in this experiment")
