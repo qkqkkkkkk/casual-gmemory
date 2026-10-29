@@ -6,10 +6,59 @@ from pathlib import Path
 import random
 import shutil
 import sqlite3
+import sys
 import time
 import uuid
 
 from .interactive_data import digest, save
+
+
+ACTION_OUTPUT_INSTRUCTION = (
+    "For this environment step, output exactly ONE action command on a single line. "
+    "Start directly with the command in the task's action syntax. "
+    "Do not output a heading, Markdown, code fences, an action plan, or an explanation."
+)
+
+
+class ActionFormatError(ValueError):
+    """A node returned presentation text instead of a single action line."""
+
+
+def validate_action_response(messages, answer):
+    # Memory summarization/insight requests use the same client and may return
+    # Markdown. Only node requests carry this exact system-level contract.
+    for message in messages:
+        role = message.role if hasattr(message, "role") else message["role"]
+        content = message.content if hasattr(message, "content") else message["content"]
+        if role == "system" and ACTION_OUTPUT_INSTRUCTION in content:
+            text = answer.strip()
+            if len(text.splitlines()) != 1 or text.startswith(("#", "```", "~~~")):
+                raise ActionFormatError(
+                    f"expected one action command, received heading/Markdown or multiple lines: {answer[:500]!r}")
+            break
+
+
+def configure_action_nodes(mas, task_instruction, temperature):
+    # Native agents_team contains only solvers. The decision node submits the
+    # actual environment action and needs the same domain and output rules.
+    instruction = task_instruction + "\n" + ACTION_OUTPUT_INSTRUCTION
+    for node in (*mas._agent_nodes.values(), mas._decision_node):
+        node.reasoning_config.temperature = temperature
+        node._agent.add_task_instruction(instruction)
+
+
+def request_error_details(error):
+    """Describe the original SDK/HTTP exception without logging request headers."""
+    result, seen = [], set()
+    while error is not None and id(error) not in seen and len(result) < 8:
+        seen.add(id(error))
+        item = {"type": type(error).__name__, "message": str(error)[:4000]}
+        status = getattr(error, "status_code", None)
+        if status is not None:
+            item["http_status"] = status
+        result.append(item)
+        error = error.__cause__ or error.__context__
+    return result
 
 
 def clone_memory(source, destination):
@@ -129,14 +178,22 @@ class NativeRunner:
                     answer = super().__call__(*args, **kwargs)
                     if not answer.strip():
                         raise ValueError("empty model answer; refusing unbounded native retry loop")
+                    validate_action_response(args[0] if args else kwargs.get("messages", ()), answer)
                     return answer
-                except Exception:
+                except Exception as exc:
                     client.branch_errors += 1
+                    client.last_branch_error = exc
+                    print(json.dumps({"event": ("interactive_action_format_failed" if isinstance(exc, ActionFormatError)
+                                               else "interactive_llm_request_failed"),
+                        "model": config["model"], "endpoint": config["endpoint"],
+                        "error_chain": request_error_details(exc)}, ensure_ascii=False),
+                        file=sys.stderr, flush=True)
                     raise
 
         self.client = StrictChat(config["model"], self.root / "responses.sqlite",
             experiment_seed=0, api_base=config["endpoint"])
         self.client.branch_errors = 0
+        self.client.last_branch_error = None
         self.memory = GMemory(namespace="g-memory", global_config={"working_dir": str(self.memory_dir.parent),
             "persist_dir": str(self.memory_dir), "read_only": not writable, "hop": 1},
             llm_model=self.client, embedding_func=EmbeddingFunc(config["embedding_model"]))
@@ -161,6 +218,7 @@ class NativeRunner:
         self.client.experiment_seed = seed
         calls, hits = self.client.calls, self.client.cache_hits
         errors = self.client.branch_errors
+        self.client.last_branch_error = None
         self.memory.insights_cache = []
         self.memory.current_task_context = None
 
@@ -200,18 +258,19 @@ class NativeRunner:
                 {"graph_type": "Chain", "node_num": 3, "use_critic": False,
                  "successful_topk": self.config["successful_topk"], "failed_topk": 0,
                  "insights_topk": self.config["insights_topk"], "threshold": 0.0, "use_projector": False})
-            # Native nodes default to temperature zero. Register and set both
-            # solver and decision-node settings, including every branch reset.
-            for node in (*mas._agent_nodes.values(), mas._decision_node):
-                node.reasoning_config.temperature = self.config["temperature"]
             reset_task_execution_state(mas)
-            for agent in mas.agents_team.values():
-                agent.add_task_instruction(get_dataset_system_prompt(task["dataset"], task["config"]))
+            configure_action_nodes(mas,
+                get_dataset_system_prompt(task["dataset"], task["config"]), self.config["temperature"])
             gate.set_exposure_agent_ids([*mas.agents_team, mas._decision_node.id])
             started = time.monotonic()
-            reward, success = mas.schedule(task_config)
+            try:
+                reward, success = mas.schedule(task_config)
+            except Exception:
+                if self.client.branch_errors != errors:
+                    self._raise_request_failure(task["id"])
+                raise
             if self.client.branch_errors != errors:
-                raise ValueError("model errors occurred in native retries; branch is incomplete and was not saved")
+                self._raise_request_failure(task["id"])
             out = episode.result()
             if reward != out["success"] or bool(success) != bool(out["won"]):
                 raise ValueError("native MAS did not use the registered success metric")
@@ -238,6 +297,14 @@ class NativeRunner:
 
     def close(self):
         self.client.close()
+
+    def _raise_request_failure(self, task_id):
+        error = self.client.last_branch_error
+        details = json.dumps(request_error_details(error), ensure_ascii=False)
+        reason = "LLM action format failed" if isinstance(error, ActionFormatError) else "LLM request failed"
+        raise RuntimeError(f"{reason}; incomplete episode was not saved; task={task_id}; "
+                           f"model={self.config['model']}; endpoint={self.config['endpoint']}; "
+                           f"original_errors={details}") from error
 
 
 def execute(runner, store, task, seed, drops, baseline):

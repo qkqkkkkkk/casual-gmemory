@@ -1,6 +1,7 @@
 causal_memory_control/interactive_barman.py
 causal_memory_control/interactive_tyreworld.py
 causal_memory_control/interactive_progress.py
+causal_memory_control/interactive_runtime.py
 causal_memory_control/interactive_data.py
 causal_memory_control/interactive_envs.py
 causal_memory_control/interactive_worker.py
@@ -16,6 +17,8 @@ causal_memory_control/tests/test_interactive_barman.py
 causal_memory_control/tests/test_interactive_tyreworld.py
 causal_memory_control/tests/test_interactive_progress.py
 causal_memory_control/tests/test_interactive_no_ce.py
+causal_memory_control/tests/test_interactive_request_errors.py
+causal_memory_control/tests/test_interactive_action_output.py
 causal_memory_control/tests/test_interactive_benchmark.py
 causal_memory_control/tests/test_interactive_team_u.py
 causal_memory_control/PDDL_ALFWORLD_EXPANDED.md

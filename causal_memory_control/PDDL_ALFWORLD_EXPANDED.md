@@ -374,7 +374,7 @@ bash causal_memory_control/run_interactive_expanded_v7.sh all 2>&1 \
 
 上限：support 团队运行 140、诊断团队运行 16,800、测试团队运行 6,246（PDDL 540、ALFWorld 5,706），专家任务和 CE forward 都为零。Team U 与已有动作继续复用缓存；这不是 API 请求数量或工时估计。新目录 `pddl_alfworld_gate_expanded_v8_no_ce` 区分此前失败的 v5/v6 和九策略 v7，不编辑旧 manifest、不继承旧 CE 标签。
 
-本地手动上传包列出 22 个确定文件，清单为 `interactive_v8_upload_files.txt`。保留 v7 构造器用于以后选择恢复 CE，但 v8 不调用。无数据、模型、结果、FEVER/HotpotQA 改动；不自动上传。
+本地手动上传包现列出 25 个确定文件（包含后续请求错误诊断与动作输出回归），清单为 `interactive_v8_upload_files.txt`。保留 v7 构造器用于以后选择恢复 CE，但 v8 不调用。无数据、模型、结果、FEVER/HotpotQA 改动；不自动上传。
 
 ```bash
 # 本地 Mac 执行：
@@ -418,3 +418,108 @@ bash causal_memory_control/run_interactive_expanded_v8.sh all 2>&1 \
 不要改回 v7 启动脚本，也不用 nohup 或 `&`；终端直接显示进度。需要断线保留时先进入 tmux 再运行。设备默认 GPU 0、Ollama 11442；`CMC_INTERACTIVE_GPU` / `CMC_INTERACTIVE_ENDPOINT` 可按已核实的实际服务设置。正式结果仍需运行后生成，本次没有新增策略实测成绩。
 
 v8 最终本地回归 47 项通过（88.377 秒），包括八策略配置/报告/恢复不要求 CE checkpoint、诊断 Team U 使用原分支、smoke 不调用专家、显式 CE 阶段拒绝，以及旧九策略入口继续工作。完整 v8 只读计划确认八行、七阶段、专家与 CE forward 为零、测试 schedule 上限合计 6,246、输出目录未创建。未运行服务器正式实验，也未执行 FEVER/HotpotQA 的训练或测评。
+
+### v8 的真实生成请求失败排查
+
+服务器单测 9 项通过、plan 通过后，真实 smoke 在 `pddl/fold_00` 的第一次 solver 调用失败。日志顺序为 `LLM request failed after four attempts`（原生 solver 又重试三次），然后原生 MacNet 使用尚未赋值的 `action`，触发 `UnboundLocalError`。该 smoke 没有通过，不能据单测和模型身份校验成功就启动 all。Ollama `/api/tags` / `/api/show` 读取成功，只说明元信息可读；不保证 `/v1/chat/completions` 能实际生成。
+
+现有日志没有打印底层 SDK/HTTP 错误，因此还不能判断连接、超时、API 参数或 Ollama runner/GPU 是否出了问题。Gym/FINCH/Chroma telemetry 的警告之后程序继续执行，它们没有直接触发这次终止。plan 的 `local_model_paths_exist=false` 是把模型仓库 ID 当成本地路径检查的结果，不足以判定 HF 缓存缺失；BERT 训练缓存仍需在实际训练前核实。
+
+先在服务器运行一个最小生成请求并保留 HTTP 状态码和响应体：
+
+```bash
+curl --noproxy '*' -sS -i --connect-timeout 5 --max-time 90 \
+  http://127.0.0.1:11442/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen2.5:7b","messages":[{"role":"user","content":"Reply OK"}],"max_tokens":8,"temperature":0.7,"seed":2000,"n":1,"stream":false}'
+```
+
+若 curl 能生成、实验仍失败，再通过同一 OpenAI SDK 检查异常，以便区分 HTTPX 的代理/连接设置与服务生成问题：
+
+```bash
+python - <<'PY'
+from openai import OpenAI
+with OpenAI(base_url="http://127.0.0.1:11442/v1", api_key="EMPTY",
+            timeout=180, max_retries=0) as client:
+    result = client.chat.completions.create(
+        model="qwen2.5:7b", messages=[{"role":"user", "content":"Reply OK"}],
+        temperature=0.7, max_tokens=16, stop=["\n"], n=1, seed=2000)
+    print(repr(result.choices[0].message.content))
+PY
+```
+
+诊断修复只改 `interactive_runtime.py`：StrictChat 保留异常原因链、异常类型和 HTTP 状态；NativeRunner 将原生错误重新关联到请求原因，拒绝保存不完整 episode。失败事件直接打印并进入阶段日志。成功请求、采样参数、缓存键和配对检查不变；没有修改共享的 seeded_client.py 或原生 MacNet，也没有给 action 填假值或把接口失败算成任务失败成绩。本地 13 项针对性检查通过，包含真实原生 MacNet 配合假 HTTP 503/空响应时保留根因、正常无 DROP 回放、八策略和终端日志；没有实际远程模型调用。
+
+用户手动通过 Git 同步本次诊断修改时，只提交这四个文件：
+
+```bash
+git add causal_memory_control/interactive_runtime.py \
+  causal_memory_control/tests/test_interactive_request_errors.py \
+  causal_memory_control/interactive_v8_upload_files.txt \
+  causal_memory_control/PDDL_ALFWORLD_EXPANDED.md
+git commit -m "Preserve original LLM request errors in interactive runs"
+git push origin main
+```
+
+服务生成问题修复后，再运行 smoke。若同时应用了这次适配器源码修改，因为实现哈希已改变，要保留失败的 v8 目录并使用新的输出目录：
+
+```bash
+export CMC_INTERACTIVE_OUTPUT=/mnt/mydata/hjq/casual-gmemory/causal_memory_control/results/pddl_alfworld_gate_expanded_v8_no_ce_requestfix
+bash causal_memory_control/run_interactive_expanded_v8.sh smoke
+```
+
+只有五折 PDDL 和 ALFWorld smoke 全部通过后，再用同一个 `CMC_INTERACTIVE_OUTPUT` 执行 all。如果只修复外部 Ollama 服务、源码和原配置完全未变，可以恢复原 v8 目录，无需仅因服务曾报错而删除实验数据。
+
+### 动作输出修复：decision 节点遗漏任务指令
+
+本次服务器 fold_00 的 8 个 support 任务均为 `success=0`、`step_limit=30`，共 240 步中的 168 步无效，最终 insights 数为零。当前协议只暴露成功轨迹和 insights，所以 `collect` 的 `no diagnostic candidates` 是结果；数据库文件存在不代表有可检索的成功轨迹。`gripper:prob14` 的前 8 步均为 `## Action Plan`，证明提交给环境的是标题而非动作。
+
+原生 MacNet 只把三个 solver 放入 `agents_team`，最终提交环境动作的 `_decision_node` 不在其中。适配器原先只遍历 `agents_team` 添加领域指令，导致 decision 缺少动作语法规则。节点还配置了 `stop=["\n"]`，标题后的换行会结束生成，原生 `process_action` 也只保留第一行，因此不能指望从标题后提取尚未生成的动作。
+
+修复位于 `interactive_runtime.py`：对三个 solver 和 decision 统一追加原有任务规则及“只输出下一步的一条命令、不加标题或说明”的要求；保持采样温度、步数、换行停止、检索、标签和八策略设置。动作请求返回纯标题、代码围栏或多行回复时打印 `interactive_action_format_failed` 并拒绝提交不完整 episode。合法性仍由环境判断，不用规划器替换动作，不过滤普通非法动作，也不把部分目标进度当成成功。共享 MacNet、FEVER/HotpotQA 和 seeded client 不修改。模型生成的其他错误格式仍可能由原生环境作为无效动作反馈；本修复不保证真实 Qwen 每题成功。
+
+本地测试使用固定回复驱动真实 Gripper `prob14`：全部四个节点收到任务/输出规则，12 步完成目标、无效动作为零，并通过无 DROP 回放；纯标题回复在环境执行前报格式错误且不保存记忆。这里没有调用服务器上的 Qwen。
+
+以下命令每一条占一整行，逐条复制执行，不使用 heredoc 或反斜杠续行。本地只暂存这五个相关文件（同时包含先前尚未提交的请求错误诊断）：
+
+```bash
+git add causal_memory_control/interactive_runtime.py causal_memory_control/tests/test_interactive_request_errors.py causal_memory_control/tests/test_interactive_action_output.py causal_memory_control/interactive_v8_upload_files.txt causal_memory_control/PDDL_ALFWORLD_EXPANDED.md
+git commit -m "Fix interactive action instructions for the decision node"
+git push origin main
+```
+
+服务器先确认没有旧实验运行，再查看本地源码改动并拉取：
+
+```bash
+cd /mnt/mydata/hjq/casual-gmemory
+pgrep -af 'causal_memory_control\.(run_interactive_gate_benchmark|interactive_worker|interactive_envs)'
+git status --short
+git pull --ff-only origin main
+python -X faulthandler -m unittest causal_memory_control.tests.test_interactive_action_output causal_memory_control.tests.test_interactive_request_errors causal_memory_control.tests.test_interactive_no_ce causal_memory_control.tests.test_interactive_progress -q
+```
+
+`pgrep` 无匹配的 PID 行表示这三个实验入口没有在运行；若仍有实际 PID，则先处理本次旧实验，勿并发写结果。若 `git pull` 因服务器源码改动拒绝合并，先保留并核对这些改动，不运行 `git reset --hard`。
+
+提示词和实现身份改变，必须新建输出目录，保留原 v8 库用于排错。沿用已验证的 `CMC_INTERACTIVE_ENDPOINT` 和 `CMC_INTERACTIVE_GPU`；未设置时启动器分别使用 11442 与 GPU 0。先 smoke，再只验证第一折的 8 个 support 任务，避免尚未检查库可用性就运行全部 support：
+
+```bash
+export CMC_INTERACTIVE_OUTPUT=/mnt/mydata/hjq/casual-gmemory/causal_memory_control/results/pddl_alfworld_gate_expanded_v9_actionfix_no_ce
+bash causal_memory_control/run_interactive_expanded_v8.sh smoke
+CUDA_VISIBLE_DEVICES="${CMC_INTERACTIVE_GPU:-0}" flock -n -E 75 -F "$CMC_INTERACTIVE_OUTPUT.lock" python -u -X faulthandler -m causal_memory_control.interactive_worker --config "$CMC_INTERACTIVE_OUTPUT/pddl_folds/fold_00/benchmark_manifest.json" --dataset pddl --stage support
+python -c 'import json,os; from pathlib import Path; r=Path(os.environ["CMC_INTERACTIVE_OUTPUT"])/"pddl_folds/fold_00/pddl"; rows=[json.loads((r/json.loads(p.read_text())["directory"]).parent.joinpath("episode.json").read_text()) for p in sorted((r/"support/committed").glob("*.json"))]; print("committed=",len(rows),"successes=",sum(x["outcome"]["success"] for x in rows)); [print(x["task_id"],x["outcome"]) for x in rows]'
+```
+
+第一折 support 有成功轨迹后，可用同一 manifest 验证 collect 的实际候选。以下命令会启动该折的正式诊断采集，已有分支可恢复，不是无成本检查：
+
+```bash
+CUDA_VISIBLE_DEVICES="${CMC_INTERACTIVE_GPU:-0}" flock -n -E 75 -F "$CMC_INTERACTIVE_OUTPUT.lock" python -u -X faulthandler -m causal_memory_control.interactive_worker --config "$CMC_INTERACTIVE_OUTPUT/pddl_folds/fold_00/benchmark_manifest.json" --dataset pddl --stage collect
+```
+
+第一折诊断成功后继续 all，将复用新目录中已提交的第一折 support 和诊断结果，继续其他折及 ALFWorld。旧 v8 数据不迁入新协议：
+
+```bash
+set -o pipefail
+bash causal_memory_control/run_interactive_expanded_v8.sh all 2>&1 | tee /mnt/mydata/hjq/pddl_alfworld_v9_actionfix_no_ce.launch.log
+```
+
+若新 support 仍全部失败或格式错误，保留输出并检查新轨迹，不直接放宽 success、不移除空候选校验、不增加步数掩盖格式问题。smoke 成功仍不代表 support 库可用。
