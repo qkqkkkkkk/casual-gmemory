@@ -374,7 +374,7 @@ bash causal_memory_control/run_interactive_expanded_v7.sh all 2>&1 \
 
 上限：support 团队运行 140、诊断团队运行 16,800、测试团队运行 6,246（PDDL 540、ALFWorld 5,706），专家任务和 CE forward 都为零。Team U 与已有动作继续复用缓存；这不是 API 请求数量或工时估计。新目录 `pddl_alfworld_gate_expanded_v8_no_ce` 区分此前失败的 v5/v6 和九策略 v7，不编辑旧 manifest、不继承旧 CE 标签。
 
-本地手动上传包现列出 25 个确定文件（包含后续请求错误诊断与动作输出回归），清单为 `interactive_v8_upload_files.txt`。保留 v7 构造器用于以后选择恢复 CE，但 v8 不调用。无数据、模型、结果、FEVER/HotpotQA 改动；不自动上传。
+本地手动上传包现列出 27 个确定文件（包含后续请求错误诊断、动作输出回归与 support 迁移），清单为 `interactive_v8_upload_files.txt`。保留 v7 构造器用于以后选择恢复 CE，但 v8 不调用。无数据、模型、结果、FEVER/HotpotQA 改动；不自动上传。
 
 ```bash
 # 本地 Mac 执行：
@@ -476,9 +476,9 @@ bash causal_memory_control/run_interactive_expanded_v8.sh smoke
 
 原生 MacNet 只把三个 solver 放入 `agents_team`，最终提交环境动作的 `_decision_node` 不在其中。适配器原先只遍历 `agents_team` 添加领域指令，导致 decision 缺少动作语法规则。节点还配置了 `stop=["\n"]`，标题后的换行会结束生成，原生 `process_action` 也只保留第一行，因此不能指望从标题后提取尚未生成的动作。
 
-修复位于 `interactive_runtime.py`：对三个 solver 和 decision 统一追加原有任务规则及“只输出下一步的一条命令、不加标题或说明”的要求；保持采样温度、步数、换行停止、检索、标签和八策略设置。动作请求返回纯标题、代码围栏或多行回复时打印 `interactive_action_format_failed` 并拒绝提交不完整 episode。合法性仍由环境判断，不用规划器替换动作，不过滤普通非法动作，也不把部分目标进度当成成功。共享 MacNet、FEVER/HotpotQA 和 seeded client 不修改。模型生成的其他错误格式仍可能由原生环境作为无效动作反馈；本修复不保证真实 Qwen 每题成功。
+修复位于 `interactive_runtime.py`：对三个 solver 和 decision 统一追加原有任务规则及“只输出下一步的一条命令、不加标题或说明”的要求；保持采样温度、步数、换行停止、检索、标签和八策略设置。v9 首版把纯标题、代码围栏或多行回复视为 `interactive_action_format_failed` 并拒绝提交 episode；后续 ALFWorld 在第 54 个 support 遇到代码围栏，这条过严的处理已由下一节的 warning 修复替代。合法性仍由环境判断，不用规划器替换动作，不过滤普通非法动作，也不把部分目标进度当成成功。共享 MacNet、FEVER/HotpotQA 和 seeded client 不修改。本修复不保证真实 Qwen 每题成功。
 
-本地测试使用固定回复驱动真实 Gripper `prob14`：全部四个节点收到任务/输出规则，12 步完成目标、无效动作为零，并通过无 DROP 回放；纯标题回复在环境执行前报格式错误且不保存记忆。这里没有调用服务器上的 Qwen。
+本地测试使用固定回复驱动真实 Gripper `prob14`：全部四个节点收到任务/输出规则，12 步完成目标、无效动作为零，并通过无 DROP 回放。v9 首版另测试了纯标题回复中止；下一节已改为验证格式错误正常消耗步数并保留失败结果。这里没有调用服务器上的 Qwen。
 
 以下命令每一条占一整行，逐条复制执行，不使用 heredoc 或反斜杠续行。本地只暂存这五个相关文件（同时包含先前尚未提交的请求错误诊断）：
 
@@ -523,3 +523,44 @@ bash causal_memory_control/run_interactive_expanded_v8.sh all 2>&1 | tee /mnt/my
 ```
 
 若新 support 仍全部失败或格式错误，保留输出并检查新轨迹，不直接放宽 success、不移除空候选校验、不增加步数掩盖格式问题。smoke 成功仍不代表 support 库可用。
+
+### v10：模型格式错误交给环境反馈，并保留 v9 的已提交 support
+
+服务器 v9 在 ALFWorld support 的 `53/100` 后停止，任务为 `pick_cool_then_place_in_recep-Bread-None-CounterTop-15/trial_T20190909_085557_322273`。真正异常是 decision 生成了代码围栏开头 ` ```plaintext `，随后本地格式校验抛出 `ActionFormatError`；不是本次请求的连接或超时错误。换行停止令这次回复只包含围栏，无法从未生成的后续行提取命令。缓存保存了这条回复，同样配置直接重启仍可能在同一处停止。
+
+`interactive_runtime.py` 现在对这类模型输出打印 `interactive_action_format_warning`，原样返回给原生 MacNet。solver 输出进入原有协作；decision 输出经原有 `process_action` 进入环境，不合法时计入无效动作和步数，再获得环境反馈。持续无效可达到步数上限，作为真实失败任务保存；不额外重试直到成功、不跳过任务、不添加替代动作。提示词、温度、种子、停止参数、记忆检索和成功指标不变。连接异常、HTTP 错误和空回复仍中止并保留原因链。
+
+为复用 v9 已提交结果，新增独立命令 `migrate_interactive_format_support.py`。它仅接受已知 v9 runtime 的 SHA256，校验除本次 runtime 修复以外的全部已登记源码、任务文件、折 manifest、连续提交标记、episode 和冻结记忆哈希；拒绝已经存在诊断/训练/测评产物的源数据集。v9 任何节点的格式错误都会使整个 episode 无法提交，所以已提交的前缀不含被新处理改变的路径，可复用。新目录记录旧 manifest/提交标记、迁移原因和新旧配置摘要；episode 与记忆内容保持相同，模型请求缓存使用 SQLite backup 复制。只重绑定新目录与已知 runtime 代码身份，旧目录不修改，也不绕过普通入口的配置校验。
+
+迁移需要源和目标实验锁均可获取，目标必须是不存在的独立目录。没有 `--apply` 时仅校验，可能创建锁文件但不创建目标结果目录、不调用模型。复制先写入临时目录，全部校验后再重命名为目标；复制失败会清理本次临时目录。未提交的失败 attempt 留在原目录，恢复时从最后一次成功提交的记忆状态重新执行该任务。对服务器日志中的进度，预期可复用 5 折共 40 个 PDDL support 和 53 个 ALFWorld support；实际数量以迁移输出为准。
+
+本地只提交本次六个文件，再手动 push：
+
+```bash
+git add causal_memory_control/interactive_runtime.py causal_memory_control/migrate_interactive_format_support.py causal_memory_control/tests/test_interactive_action_output.py causal_memory_control/tests/test_interactive_format_migration.py causal_memory_control/interactive_v8_upload_files.txt causal_memory_control/PDDL_ALFWORLD_EXPANDED.md
+git commit -m "Keep malformed interactive actions within episode budgets and migrate support"
+git push origin main
+```
+
+服务器逐条执行。先确认旧实验入口没有实际 PID，再拉取代码；如果服务器有未提交源码改动，先保留核对，不强制覆盖：
+
+```bash
+cd /mnt/mydata/hjq/casual-gmemory
+pgrep -af 'causal_memory_control\.(run_interactive_gate_benchmark|interactive_worker|interactive_envs)'
+git pull --ff-only origin main
+python -X faulthandler -m unittest causal_memory_control.tests.test_interactive_action_output causal_memory_control.tests.test_interactive_request_errors causal_memory_control.tests.test_interactive_format_migration causal_memory_control.tests.test_interactive_no_ce causal_memory_control.tests.test_interactive_progress -q
+export CMC_INTERACTIVE_OUTPUT=/mnt/mydata/hjq/casual-gmemory/causal_memory_control/results/pddl_alfworld_gate_expanded_v10_formatwarn_no_ce
+python -m causal_memory_control.migrate_interactive_format_support --source /mnt/mydata/hjq/casual-gmemory/causal_memory_control/results/pddl_alfworld_gate_expanded_v9_actionfix_no_ce --output-dir "$CMC_INTERACTIVE_OUTPUT" --apply
+bash causal_memory_control/run_interactive_expanded_v8.sh smoke
+```
+
+迁移及 smoke 成功后，在同一个终端用相同 endpoint/GPU 继续 all。会跳过已提交的 PDDL/ALFWorld support，从 ALFWorld 未完成任务继续；阶段日志仍直接显示在当前终端：
+
+```bash
+set -o pipefail
+bash causal_memory_control/run_interactive_expanded_v8.sh all 2>&1 | tee -a /mnt/mydata/hjq/pddl_alfworld_v10_formatwarn_no_ce.launch.log
+```
+
+无需删除 v9、手工编辑 manifest、清空模型缓存或改随机种子。若迁移校验拒绝，保留错误以便核对，不绕过哈希检查。新流程仍可能有模型任务失败；格式 warning 本身不再导致整个实验退出。
+
+本地针对性回归共 25 项通过：动作/请求错误 7 项、迁移 6 项、八策略/终端进度及原生回放/事务恢复/采集测评 12 项。迁移测试包含源文件内容不变、模型回复缓存保留、仅补未完成任务、已有冻结快照可恢复、拒绝未知源码或篡改产物、运行锁、复制失败清理，以及迁移后的配置能被正式 CLI 接受。ALFWorld 格式回归使用假 TextWorld 反馈验证原生 MacNet/适配器行为；未调用服务器 Qwen 或运行远程实验。

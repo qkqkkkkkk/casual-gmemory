@@ -178,13 +178,21 @@ class NativeRunner:
                     answer = super().__call__(*args, **kwargs)
                     if not answer.strip():
                         raise ValueError("empty model answer; refusing unbounded native retry loop")
-                    validate_action_response(args[0] if args else kwargs.get("messages", ()), answer)
+                    try:
+                        validate_action_response(args[0] if args else kwargs.get("messages", ()), answer)
+                    except ActionFormatError as exc:
+                        # A model's formatting mistake is an ordinary output.
+                        # Preserve it for native node collaboration/environment
+                        # feedback; do not retry until a better answer appears.
+                        print(json.dumps({"event": "interactive_action_format_warning",
+                            "model": config["model"], "endpoint": config["endpoint"],
+                            "message": str(exc), "handling": "native_action_processing"},
+                            ensure_ascii=False), file=sys.stderr, flush=True)
                     return answer
                 except Exception as exc:
                     client.branch_errors += 1
                     client.last_branch_error = exc
-                    print(json.dumps({"event": ("interactive_action_format_failed" if isinstance(exc, ActionFormatError)
-                                               else "interactive_llm_request_failed"),
+                    print(json.dumps({"event": "interactive_llm_request_failed",
                         "model": config["model"], "endpoint": config["endpoint"],
                         "error_chain": request_error_details(exc)}, ensure_ascii=False),
                         file=sys.stderr, flush=True)

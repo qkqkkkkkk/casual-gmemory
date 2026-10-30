@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 from causal_memory_control.interactive_data import pddl_inventory
-from causal_memory_control.interactive_envs import Episode, quiet_native_imports
+from causal_memory_control.interactive_envs import quiet_native_imports
 from causal_memory_control.interactive_runtime import (
     ACTION_OUTPUT_INSTRUCTION, ActionFormatError, NativeRunner, audit, validate_action_response,
 )
@@ -86,7 +86,7 @@ class ActionOutputTests(unittest.TestCase):
             self.assertEqual(options["stop_strs"], ["\n"])
             self.assertEqual(options["temperature"], .7)
 
-    def test_heading_only_response_stops_before_any_environment_step_or_memory_write(self):
+    def test_heading_only_response_counts_as_invalid_action_without_aborting_episode(self):
         quiet_native_imports()
         from mas.memory.mas_memory.memory_base import MASMemoryBase
 
@@ -117,19 +117,88 @@ class ActionOutputTests(unittest.TestCase):
              redirect_stderr(io.StringIO()) as errors, \
              mock.patch("causal_diagnostic.oracle_recipient.seeded_client.SeededCachedChat", Chat), \
              mock.patch("mas.memory.mas_memory.GMemory.GMemory", Memory), \
-             mock.patch("mas.utils.EmbeddingFunc", return_value=None), \
-             mock.patch.object(Episode, "step", side_effect=AssertionError("must not execute a heading")) as step:
-            runner = NativeRunner(self.config(), directory, Path(directory) / "empty-memory")
+             mock.patch("mas.utils.EmbeddingFunc", return_value=None):
+            config = {**self.config(), "max_steps": 2}
+            runner = NativeRunner(config, directory, Path(directory) / "empty-memory")
             try:
-                with self.assertRaisesRegex(RuntimeError, "LLM action format failed") as raised:
-                    runner.run(task, 2000)
-                self.assertIsInstance(raised.exception.__cause__, ActionFormatError)
-                self.assertIn("## Action Plan", str(raised.exception))
-                step.assert_not_called()
-                self.assertEqual(saved, [])
+                result = runner.run(task, 2000)
+                self.assertEqual(result["outcome"]["steps"], 2)
+                self.assertEqual(result["outcome"]["success"], 0)
+                self.assertEqual(result["outcome"]["invalid_actions"], 2)
+                self.assertEqual(result["outcome"]["termination_reason"], "step_limit")
+                self.assertTrue(all(t["action"] == "## Action Plan" for t in result["trajectory"]))
+                self.assertEqual(len(saved), 1)
+                self.assertFalse(saved[0].label)
+                self.assertEqual(runner.client.branch_errors, 0)
+                self.assertEqual(runner.client.calls, 8)
                 events = [json.loads(line) for line in errors.getvalue().splitlines() if line.startswith("{")]
-                self.assertEqual(len(events), 3)
-                self.assertTrue(all(e["event"] == "interactive_action_format_failed" for e in events))
+                self.assertEqual(len(events), 8)
+                self.assertTrue(all(e["event"] == "interactive_action_format_warning" for e in events))
+            finally:
+                runner.close()
+
+    def test_alfworld_fence_consumes_one_step_and_next_action_can_succeed(self):
+        quiet_native_imports()
+        from mas.memory.mas_memory.memory_base import MASMemoryBase
+        from types import SimpleNamespace
+
+        class Memory(MASMemoryBase):
+            def retrieve_memory(self, **kwargs):
+                return self.apply_retrieval_gate(([], [], []),
+                    query_task=kwargs["query_task"], task_state=self.current_task_context.task_description)
+
+        class Chat:
+            def __init__(self, *args, **kwargs):
+                self.calls = self.cache_hits = 0
+
+            def __call__(self, *args, **kwargs):
+                self.calls += 1
+                return "```plaintext" if self.calls % 8 == 4 else "go to countertop 1"
+
+            def close(self):
+                pass
+
+        class TextEnvironment:
+            def __init__(self):
+                self.commands = []
+
+            def reset(self):
+                return SimpleNamespace(feedback="Your task is to: put bread on countertop.", won=False,
+                                       admissible_commands=["go to countertop 1"])
+
+            def step(self, action):
+                self.commands.append(action)
+                valid = action == "go to countertop 1"
+                return SimpleNamespace(feedback="Done." if valid else "Nothing happens.", won=valid,
+                                       admissible_commands=["go to countertop 1"]), int(valid), valid
+
+            def close(self):
+                pass
+
+        game = "mock-game.z8"
+        task = {"id": "alfworld:format-test", "dataset": "alfworld", "task_type": "put",
+                "config": {"task_type": "put", "env_kwargs": {"gamefile": game}}, "files": {game: "test-hash"}}
+        environment = TextEnvironment()
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()), \
+             redirect_stderr(io.StringIO()), \
+             mock.patch("textworld.start", return_value=environment), \
+             mock.patch("causal_diagnostic.oracle_recipient.seeded_client.SeededCachedChat", Chat), \
+             mock.patch("mas.memory.mas_memory.GMemory.GMemory", Memory), \
+             mock.patch("mas.utils.EmbeddingFunc", return_value=None):
+            runner = NativeRunner({**self.config(), "max_steps": 2}, directory, Path(directory) / "empty-memory")
+            try:
+                result = runner.run(task, 2000)
+                replay = runner.run(task, 2000, expected=result)
+                audit(replay, result, [])
+                self.assertEqual(result["outcome"]["success"], 1)
+                self.assertEqual(result["outcome"]["steps"], 2)
+                self.assertEqual(result["outcome"]["invalid_actions"], 1)
+                self.assertEqual(result["trajectory"][0]["action"], "```plaintext")
+                self.assertFalse(result["trajectory"][0]["valid_action"])
+                self.assertEqual(result["trajectory"][1]["action"], "go to countertop 1")
+                self.assertEqual(runner.client.calls, 16)
+                self.assertEqual(runner.client.branch_errors, 0)
+                self.assertEqual(environment.commands, ["```plaintext", "go to countertop 1"] * 2)
             finally:
                 runner.close()
 
