@@ -115,12 +115,15 @@ def labels(config, name):
         return
     rows, hashes = measured_lists(config, name)
     root = Path(config["output_dir"]) / name / "local_global_team_u"
-    encoder = SentenceTransformerEmbedder(config["embedding_model"], cache_path=root / "dedup.sqlite")
-    try:
-        identity = dedup_identity(encoder, {"model": config["embedding_model"], "revision": None,
-                                          "chunk_tokens": 192, "threshold": 0.98})
-    finally:
-        encoder.close()
+    if any(row["candidates"] for row in rows):
+        encoder = SentenceTransformerEmbedder(config["embedding_model"], cache_path=root / "dedup.sqlite")
+        try:
+            identity = dedup_identity(encoder, {"model": config["embedding_model"], "revision": None,
+                                              "chunk_tokens": 192, "threshold": 0.98})
+        finally:
+            encoder.close()
+    else:
+        identity = {"enabled": False, "reason": "no_candidate_supervision"}
     ce_identity = root.parent / "csm_st/dedup_identity.json"
     if ce_identity.exists() and json.loads(ce_identity.read_text()) != identity:
         raise ValueError("Team U semantic dedup model differs from the CE comparison")
@@ -134,17 +137,34 @@ def labels(config, name):
         values = [v for r in rows if r["task_id"] in set(split[part]) for v in r["team_u"]]
         distributions[part] = {"candidates": len(values), "positive": sum(v > 0 for v in values),
             "zero": sum(v == 0 for v in values), "negative": sum(v < 0 for v in values),
-            "minimum": min(values), "maximum": max(values)}
+            "minimum": min(values) if values else None, "maximum": max(values) if values else None,
+            "empty_task_ids": sorted(r["task_id"] for r in rows
+                                     if r["task_id"] in set(split[part]) and not r["candidates"])}
     save(root / "labels_manifest.json", {"schema": SCHEMA, "config_digest": digest(config),
         "label_type": LABEL, "metric": "success_explicit_won", "source_sha256": hashes,
         "fit_task_ids": split["fit"], "dev_task_ids": split["dev"], "dedup_identity": identity,
-        "deduplication": True, "dedup_placement": "post_score", "training_candidate_deduplication": False,
+        "deduplication": any(r["candidates"] for r in rows), "dedup_placement": "post_score", "training_candidate_deduplication": False,
         "recombination": False, "new_team_rollouts": 0, "ce_forwards": 0, "expert_targets_used": False,
         "team_u_distribution": distributions, "artifact_sha256": {f: sha(root / f) for f in
             ("team_u_labels.jsonl", "split.json", "dedup_identity.json")}})
 
 
 def train(config, name):
+    from .interactive_empty_memory import coverage, save_skip, validated_skip
+    from .interactive_training import diagnostic_lists
+
+    data = config["experiments"][name]
+    source = diagnostic_lists(Path(config["output_dir"]) / name, data)
+    counts = coverage(source, data)
+    if not any(counts[part]["candidate_count"] for part in counts):
+        # Validate measured KEEP outcomes even though there are no U labels.
+        if not validate_labels(config, name):
+            raise FileNotFoundError("run labels_team_u before train_team_u")
+        save_skip(config, name, source, ("local_global_team_u",))
+        return
+    if not counts["fit"]["candidate_count"] or not counts["dev"]["candidate_count"]:
+        raise ValueError("nonempty candidates require fit and dev supervision; no untrained Team U fallback")
+    validated_skip(config, name, "local_global_team_u")
     from .csm_st_data import read_rows, write_rows
     from .csm_st_model import CSMConfig
     from .csm_st_training import train as fit
@@ -166,15 +186,20 @@ def train(config, name):
         if (raw.get("training_metadata", {}).get("config_digest") != digest(config)
                 or raw.get("training_metadata", {}).get("estimator", {}).get("type") != "local_global_team_u"):
             raise ValueError("unexpected Team U intermediate checkpoint")
-    rows = [{**r, "ci": r["team_u"]} for r in read_rows(root / "team_u_labels.jsonl")]
+    rows = [{**r, "ci": r["team_u"]} for r in read_rows(root / "team_u_labels.jsonl") if r["candidates"]]
     options = training_options(config, team_u=True)
     payload = fit(rows, root, model_config=CSMConfig(encoder=config["encoder_model"]), options=options,
-        fit_ids=set(provenance["fit_task_ids"]), dev_ids=set(provenance["dev_task_ids"]),
+        fit_ids=set(counts["fit"]["supervised_task_ids"]), dev_ids=set(counts["dev"]["supervised_task_ids"]),
         metadata={"dataset": name, "config_digest": digest(config), "metric": "success",
             "label_type": LABEL, "candidate_kinds": ["trajectory", "insight"],
             "estimator": {"type": "local_global_team_u"}, "source_diagnostic_rewards_used": True,
             "training_source_sha256": provenance["source_sha256"]},
         dedup_config=deployment_dedup(provenance), label_provenance=provenance)
+    # Preserve the registered split, while distinguishing actual supervised
+    # tasks from observed empty lists in checkpoint provenance.
+    payload["training_metadata"].update(fit_task_ids=sorted(provenance["fit_task_ids"]),
+        dev_task_ids=sorted(provenance["dev_task_ids"]), candidate_coverage=counts,
+        training_task_ids=sorted(provenance["fit_task_ids"] + provenance["dev_task_ids"]))
     spec = payload.pop("csm_st")
     spec.update(schema=SCHEMA, label_type=LABEL, target_range=[-1, 1], output_activation="unbounded")
     payload["local_global_team_u"] = spec

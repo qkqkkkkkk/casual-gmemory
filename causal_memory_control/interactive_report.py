@@ -51,6 +51,10 @@ def policy_statistics(ids, values, baseline, tasks, name):
         "improved_tasks": [t for t, e in zip(ids, effects) if e > 0],
         "harmed_tasks": [t for t, e in zip(ids, effects) if e < 0],
         "mean_drop_count": statistics.mean(r["dropped_count"] for r in ordered),
+        "empty_candidate_tasks": sum(r["retrieved_count"] == 0 for r in ordered),
+        "empty_candidate_rate": sum(r["retrieved_count"] == 0 for r in ordered) / len(ids),
+        "untrained_empty_only_tasks": sum(r.get("gate_training_status") ==
+            "skipped_no_candidate_supervision" for r in ordered),
         "keep_rate": kept/total if total else 1.0, "groups": grouped,
         "macro_success": {f: statistics.mean(v["success"] for v in bins.values()) for f, bins in grouped.items()},
         "mean_progress": statistics.mean(r["outcome"]["progress"] for r in ordered) if name == "pddl" else None,
@@ -64,7 +68,7 @@ def aggregate_cv(config, name):
     from .csm_st_data import write_rows
 
     root = Path(config["output_dir"]) / name
-    records, sources, checkpoints, fold_scores, tested = [], {}, {}, {}, set()
+    records, sources, checkpoints, fold_scores, tested, skipped = [], {}, {}, {}, set(), {}
     for label, expected in dataset_jobs(config, name):
         child_root = Path(expected["output_dir"])
         child_path = child_root / "benchmark_manifest.json"
@@ -81,6 +85,8 @@ def aggregate_cv(config, name):
                           "policy_log_sha256": sha(path), "snapshot_sha256": summary["snapshot_sha256"],
                           "split": split}
         checkpoints[label] = summary["checkpoints_sha256"]
+        if summary.get("untrained_methods"):
+            skipped[label] = summary["untrained_methods"]
         fold_scores[label] = {m: v["success"] for m, v in summary["policies"].items()}
         for raw in path.read_text().splitlines():
             if raw.strip():
@@ -92,18 +98,25 @@ def aggregate_cv(config, name):
     source_manifest = {"schema": "interactive-five-fold-oof-sources-v1", "parent_config_digest": digest(config),
         "folds": sources, "checkpoints_sha256": checkpoints,
         "constraint": "independent memory/checkpoints/caches per fold; no outer-test tuning"}
+    if skipped:
+        source_manifest["untrained_methods"] = skipped
     locked(root / "cv_sources.json", source_manifest)
     write_rows(root / "evaluation/policies.jsonl", records)
     return source_manifest, fold_scores
 
 
-def report(config, qa_root=None):
+def report(config, qa_root=None, *, datasets=None):
     if config.get("simulation") and qa_root is not None:
         raise ValueError("simulation reports cannot mix in measured QA results")
     output = Path(config["output_dir"])
     registered_policies = policies(config)
+    selected = set(config["experiments"]) if datasets is None else set(datasets)
+    if not selected or selected - set(config["experiments"]):
+        raise ValueError("report requires registered datasets")
     summaries = {}
     for name, data in config["experiments"].items():
+        if name not in selected:
+            continue
         root = output / name
         cv_provenance, fold_scores = (aggregate_cv(config, name) if "cv_splits" in data else (None, None))
         path = root / "evaluation/policies.jsonl"
@@ -161,8 +174,15 @@ def report(config, qa_root=None):
             oracle = by_method["oracle"][task_id]["outcome"]["success"]
             if oracle < by_method["global_drop"][task_id]["outcome"]["success"]:
                 raise ValueError("Oracle candidate set should include DROP ALL")
-        checkpoints = (cv_provenance["checkpoints_sha256"] if cv_provenance else
-            {m: sha(root / m / "checkpoint.json") for m in learned_methods(config)})
+        from .interactive_empty_memory import training_artifacts, upgrade_provenance
+        if cv_provenance:
+            checkpoints, skipped = cv_provenance["checkpoints_sha256"], cv_provenance.get("untrained_methods", {})
+        else:
+            checkpoints, skipped = training_artifacts(config, name)
+            for method in skipped:
+                if any(r["retrieved_count"] or r.get("gate_training_status") !=
+                       "skipped_no_candidate_supervision" for r in by_method[method].values()):
+                    raise ValueError("untrained gate results must be explicitly marked empty-only")
         summaries[name] = {"schema": "interactive-comparison-v1", "metric": "success",
             "ce_enabled": not config.get("exclude_ce", False),
             "simulation": bool(config.get("simulation", False)),
@@ -172,6 +192,8 @@ def report(config, qa_root=None):
             "protocol": data["protocol"], "task_ids": ids, "task_ids_sha256": digest(ids),
             "primary_test_ids": primary_ids, "test_cohorts": cohorts,
             "source_root": str(root), "evaluation_log_sha256": sha(path), "checkpoints_sha256": checkpoints,
+            "untrained_methods": skipped,
+            "implementation_upgrade": upgrade_provenance(config),
             "snapshot_sha256": sha(root / ("cv_sources.json" if cv_provenance else "snapshot.json")),
             "seed": config["evaluation_seed"],
             "evaluation_design": "five_fold_out_of_fold" if cv_provenance else "fixed_holdout",
@@ -190,7 +212,9 @@ def report(config, qa_root=None):
         from .interactive_prior_results import import_qa
         prior = import_qa(qa_root)
     simulation = bool(config.get("simulation", False))
-    save(output / "matrix_results.json", {"schema": "interactive-matrix-v1", "simulation": simulation, "datasets": summaries,
+    matrix_output = output if selected == set(config["experiments"]) else (
+        output / "empty_memory_upgrade" / ("report_" + "_".join(sorted(selected))))
+    save(matrix_output / "matrix_results.json", {"schema": "interactive-matrix-v1", "simulation": simulation, "datasets": summaries,
         "fever_hotpotqa": prior or "not executed or inferred from screenshot; no imported verified source provided"})
     extra_cohort = "train_scene_holdout" in summaries.get("alfworld", {}).get("test_cohorts", {})
     text = ("| Policy | FEVER binary Accuracy % | HotpotQA Answer F1 / EM % | PDDL Success % | ALFWorld unseen Success % |"
@@ -231,6 +255,8 @@ def report(config, qa_root=None):
     text += ("\nSuccess 使用显式 won，progress 单独保存。"
              "Random 为预声明随机种子的均值；Oracle 只在已声明动作中事后选择。"
              "FEVER/HotpotQA 仅可从已有日志只读导入，缺失保留为空。未核验的截图分数不纳入本表。\n")
+    text += ("\n空候选任务保留在测评分母；各策略共享同种子的无记忆结果。"
+             "整折无候选监督时明确标记未训练，不生成 checkpoint；这些任务不构成 gate 学习效果的证据。\n")
     if config.get("include_local_global_team_u"):
         text += ("\nTeam U 在原候选列表上训练和评分，随后语义去重，保留 U>0 的非重复项，删除不限量。"
                  "复用已测 KEEP/SINGLE DROP Success，不使用专家或 CE，不重组候选列表；损失采用 QA Team U 的 reward 尺度参数。"
@@ -244,8 +270,8 @@ def report(config, qa_root=None):
                     text += f"| {label} | {cohort} | {stats['n']} | {100*stats['success']:.2f} |\n"
     if simulation:
         text = "**模拟输出：全部分数来自人工构造的合成日志，仅展示格式，不代表实测或预期效果。**\n\n" + text
-    (output / "matrix_results.md").write_text(text)
-    (output / "matrix_results.csv").write_text(table.getvalue())
+    (matrix_output / "matrix_results.md").write_text(text)
+    (matrix_output / "matrix_results.csv").write_text(table.getvalue())
     return summaries
 
 

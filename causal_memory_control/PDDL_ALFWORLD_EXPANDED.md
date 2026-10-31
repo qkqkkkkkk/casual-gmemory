@@ -607,3 +607,91 @@ CUDA_VISIBLE_DEVICES="${CMC_INTERACTIVE_GPU:-0}" python -u -X faulthandler -m ca
 ```
 
 终端出现 `[备份完成]` 后才继续校验服务及执行阶段。以后中断仍用同一命令续跑，不重复迁移、不删除 PDDL、也不回到会先跑 PDDL 的原 `all` 启动器。当前只暂停 PDDL，空候选原因仍留待单独排查；ALFWorld 自身若也有空候选或请求错误仍会如实停止，不跳过失败任务。
+
+### fold_02 全失败：动作检查、原生冷启动与空记忆边界
+
+服务器检查显示 fold_02 的 8 个 support 均 success=0、30 步耗尽，累计 240 步有 199 步无效（82.9%），insight_count=0。这确认该折没有成功 support 来源及已保存 insights，但还不能确定为何动作失败。特别是高无效比例可能来自标题/代码围栏、对象或参数顺序、动作前置条件不满足、重复动作或观测处理等；必须对照实际轨迹，不能直接当作纯粹的规划难度或步数不够。有效动作也不保证目标推进，合法性与规划质量需分开看。
+
+核对本地原项目 upstream/main（d9b5aef）的 tasks/run.py、MacNet 与 GMemory：常规入口创建/加载持久库，连续跑任务，每题结束追加成功或失败交互；空成功列表/空 insights 直接作为空列表进入提示词，仍可凭任务说明、静态 few-shot 和环境反馈作答，没有单独保证成功轨迹的 init 命令。init_task_context 只建立当前题的上下文，不会创建成功经验。当前扩大实验 support 已承担前置建库作用，PDDL 各域规则及默认 1 条静态 few-shot 也已提供。
+
+原实现的 insights 默认每累计 5 条任务记录触发提炼；源码 _finetune_insights 的生成来源是成功任务分块和成功/失败对比。全失败时，这两种来源都为空，不能指望失败轨迹自动形成新规则。失败交互本身可以入库，但当前 MacNet 取 successful_trajectories, _, insights，忽略返回的失败轨迹，常规入口默认 failed_topk=0；单独提高 failed_topk 并不能让 MacNet 自动使用失败经验。
+
+与原在线连续积累不同，当前公平配对实验只在 support 写库，随后冻结，每个 PDDL 折独立；fit/dev/test 的试跑不会补充记忆。这一隔离是为了共享同一记忆、避免标签/测试泄漏，但小 support 加低成功率会导致不可训练的折。no diagnostic candidates 是新增诊断环节对缺少标注对象的限制，不是原生 GMemory 遇空记忆就无法运行。
+
+空记忆任务可以采用原生无检索分支；若把这种处理纳入正式比较，应保留测试分母，各策略的记忆选择在该任务上等价，不伪造成功率。没有候选不等于某条记忆的 U=0；fit/dev 没有任何候选则没有逐条监督，不能声称训练好了 gate。仅删除 collect 的检查仍会被后续训练的候选/覆盖检查拒绝，需要设计并记录无监督折的处理，而不能静默跳过。
+
+可选的预热应另立 PDDL 协议：在当前折已指定 support 上预先固定多个 rollout 种子/预算，或导入该 support 的可验证专家轨迹并明确标记专家初始化；均不使用 fit/dev/test 目标轨迹、不拼接其他折记忆，也不事后反复抽 seed 直到成功。扩充 support 需要重新登记分区；这些都改变记忆分布，应使用独立目录，不能追写已冻结 v10。当前只加入只读检查工具，未改动任何采样、空候选逻辑、训练或 ALFWorld 运行代码。
+
+工具先校验 commit 对应的 episode 哈希，只读已提交的 JSON，不打开 SQLite/Chroma、不反序列化 pickle、不加载环境/模型。默认每题展示前 8 步、初态和最常见无效动作；--steps 0 展示全部步数，--task-id 可多次指定。trajectory.action 是送入环境的处理后动作，不等同于模型完整原回复。--transcript-tail 展示已记录 observer 末尾文本，也不冒充原始 API 回复。
+
+可直接使用已有代码的单行命令查看两个 Gripper 任务的完整动作，无需更新服务器，不会影响正在运行的 ALFWorld。在服务器项目根目录执行：
+
+~~~bash
+python -c 'import json; from pathlib import Path; r=Path("causal_memory_control/results/pddl_alfworld_gate_expanded_v10_formatwarn_no_ce/pddl_folds/fold_02/pddl"); rows=[json.loads((r/json.loads(p.read_text())["directory"]).parent.joinpath("episode.json").read_text()) for p in sorted((r/"support/committed").glob("*.json"))]; [(print("TASK=",x["task_id"],"INITIAL=",x.get("state")),[print(json.dumps(s,ensure_ascii=False)) for s in x["trajectory"]]) for x in rows if x["task_id"].startswith("pddl:gripper:")]'
+~~~
+
+下次停止实验后同步工具（无需为此中断已运行的 ALFWorld），本地仅提交这些文件再 push，服务器 pull：
+
+~~~bash
+git add causal_memory_control/inspect_interactive_support.py causal_memory_control/tests/test_inspect_interactive_support.py causal_memory_control/interactive_v8_upload_files.txt causal_memory_control/PDDL_ALFWORLD_EXPANDED.md
+git commit -m "Add read-only support action inspection and document cold-start behavior"
+git push origin main
+~~~
+
+服务器模块命令（项目根目录、gmemory 环境）：
+
+~~~bash
+python -m causal_memory_control.inspect_interactive_support --root causal_memory_control/results/pddl_alfworld_gate_expanded_v10_formatwarn_no_ce/pddl_folds/fold_02/pddl --task-id pddl:gripper:prob03 --task-id pddl:gripper:prob20 --steps 0
+~~~
+
+### 空记忆兼容修复与原目录续跑（2026-10-31）
+
+本节替代此前“空候选会停止”“仅加入检查工具”的描述。collect 现在允许空候选：每个预声明种子的无记忆 KEEP 基线照常执行和保存，无 SINGLE DROP 分支，q_drop/drop_samples/branches 都为空，不把“无候选”伪造成 U=0。support 后仍然冻结，fit/dev/test 不追加记忆，不更改种子、动作解析、LLM 提示词、任务划分或 CE 排除设置。
+
+混合列表保留所有诊断任务，仅真实候选产生训练样本，checkpoint 额外记录 candidate_coverage，区分注册任务、实际监督任务和空任务。若整折 fit/dev 都没有候选，三个 Reward Gate 和 Team U 写 training_status.json，标记 skipped_no_candidate_supervision、trained=false，不创建 checkpoint，也不加载训练编码器。测试任务仍实际执行，同任务同种子的八策略复用无记忆结果，计入原测试分母。报表记录 empty_candidate_tasks、empty_candidate_rate、untrained_empty_only_tasks 和 untrained_methods；空记忆上的相同分数不能作为 gate 训练效果的证据。
+
+边界仍如实报错：如果 fit/dev 只有一侧存在监督、Reward Gate 真实样本少于原最小训练量，或未训练 gate 遇到非空测试候选，程序停止并说明原因；不借用其他折、测试集或伪造模型。完整五折 OOF 汇总仍要求每个注册问题恰好测一次。
+
+旧 v10 manifest 包含源码哈希，因此上传后不要直接用旧 shell all 命令覆盖校验。新增 continue_interactive_empty_memory 仅接受已核对的 v10 四个阶段文件升级，其他已登记源码和数据仍须一致。它先取得同一实验锁，完整备份结果目录，再在根目录和各折写独立 empty_memory_upgrade/registration.json；保留原 manifest/config digest、support、已测分支、checkpoint 和模型回复缓存。报告另存升级登记的哈希；未完成任务继续跑，已提交任务和已测分支复用。备份失败或实验仍在运行时不会启动 worker；不删除旧目录。
+
+以下命令由用户手动执行。正在跑的 ALFWorld 可先继续；准备更新服务器代码时，先等其结束，或在其前台终端 Ctrl+C 并等待退出，再 pull，避免运行过程中混用源码。
+
+本地提交本次文件（保留已有其他改动；不要 git add .）：
+
+~~~bash
+git add causal_memory_control/interactive_empty_memory.py causal_memory_control/continue_interactive_empty_memory.py causal_memory_control/interactive_worker.py causal_memory_control/interactive_training.py causal_memory_control/interactive_team_u.py causal_memory_control/interactive_report.py causal_memory_control/resume_interactive_dataset.py causal_memory_control/tests/test_interactive_empty_memory.py causal_memory_control/tests/test_continue_interactive_empty_memory.py causal_memory_control/PDDL_ALFWORLD_EXPANDED.md causal_memory_control/interactive_v8_upload_files.txt causal_memory_control/inspect_interactive_support.py causal_memory_control/tests/test_inspect_interactive_support.py
+~~~
+
+~~~bash
+git commit -m "Allow empty memory throughout interactive benchmark and preserve v10 progress"
+~~~
+
+~~~bash
+git push origin main
+~~~
+
+服务器项目根目录（gmemory 环境），旧实验退出后逐条执行：
+
+~~~bash
+git pull --ff-only origin main
+~~~
+
+~~~bash
+python -m unittest causal_memory_control.tests.test_interactive_empty_memory causal_memory_control.tests.test_continue_interactive_empty_memory causal_memory_control.tests.test_interactive_no_ce causal_memory_control.tests.test_resume_interactive_dataset causal_memory_control.tests.test_interactive_progress -q
+~~~
+
+先只读核对升级计划（不备份、不写结果、不调用模型或服务）：
+
+~~~bash
+python -m causal_memory_control.continue_interactive_empty_memory --output-dir /mnt/mydata/hjq/casual-gmemory/causal_memory_control/results/pddl_alfworld_gate_expanded_v10_formatwarn_no_ce --datasets pddl --plan-only
+~~~
+
+只续跑 PDDL，其余 ALFWorld 结果保留（GPU 0 可按你的分配修改）：
+
+~~~bash
+CUDA_VISIBLE_DEVICES=0 python -u -X faulthandler -m causal_memory_control.continue_interactive_empty_memory --output-dir /mnt/mydata/hjq/casual-gmemory/causal_memory_control/results/pddl_alfworld_gate_expanded_v10_formatwarn_no_ce --datasets pddl --stage all
+~~~
+
+如果仍先跑 ALFWorld，把 --datasets pddl 改为 --datasets alfworld；两个都接着跑用 --datasets pddl,alfworld。所有情况都沿用相同 v10 根目录，不用新建 v11，不删失败折，不重复 smoke。中断后原命令可再次执行，完整备份只做一次。仅选择一个数据集时，表格输出到 empty_memory_upgrade/report_pddl 或 report_alfworld，不覆盖根目录的合并表；全部选择时才生成完整合并表。
+
+终端会显示“空记忆……保存无记忆基线”“候选监督为 0，记录未训练；不创建 checkpoint”等明确状态，阶段进度条继续显示。此修复处理空候选流程，不会自动修正 Gripper 轨迹中机器人房间、持球状态、think 输出及动作前置条件推理错误。

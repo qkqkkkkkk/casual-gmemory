@@ -50,9 +50,8 @@ def verify_inputs(config, name):
         for path, expected in task["files"].items():
             if sha(Path(config["repo"]) / path) != expected:
                 raise ValueError(f"registered task input changed: {path}")
-    for path, expected in config["code_sha256"].items():
-        if sha(Path(config["repo"]) / path) != expected:
-            raise ValueError(f"registered implementation changed: {path}")
+    from .interactive_empty_memory import verify_registered_code
+    verify_registered_code(config)
     if model_identity(config["endpoint"], config["model"]) != config["model_identity"]:
         raise ValueError("Ollama model/template/parameters changed")
 
@@ -137,7 +136,7 @@ def collect(config, name):
                 seed = config["diagnostic_seed"] + repeat
                 baseline = baseline_for(runner, store, by_id[task_id], seed)
                 if not baseline["candidates"]:
-                    raise ValueError(f"no diagnostic candidates: {task_id}; inspect support successes")
+                    print(f"[空记忆] {task_id} / repeat={repeat}：保存无记忆基线，无 SINGLE DROP 分支。", flush=True)
                 if first is not None and any(first[k] != baseline[k] for k in
                         ("query", "state", "candidates", "retrieval_fingerprint", "initial_fingerprint")):
                     raise ValueError("diagnostic candidate lists changed across repeats")
@@ -157,7 +156,9 @@ def collect(config, name):
                 "exposure_count", "retrieval_fingerprint", "initial_fingerprint")} | {
                 "repeats": config["repeats"], "q_use": statistics.mean(uses),
                 "q_drop": [statistics.mean(v) for v in drops], "use_samples": uses, "drop_samples": drops,
-                "branches": references, "config_digest": digest(config)})
+                "branches": references, "config_digest": digest(config),
+                "candidate_status": "available" if first["candidates"] else "empty",
+                "supervision_count": len(first["candidates"])})
             progress(root, "collect", completed_tasks=task_number+1, total_tasks=len(ids))
     finally:
         runner.close()
@@ -228,9 +229,13 @@ def evaluate(config, name):
 
     root = Path(config["output_dir"]) / name
     memory = snapshot(config, name)
-    checkpoints = {m: sha(root / m / "checkpoint.json") for m in learned_methods(config)}
-    store = ActionStore(root / "evaluation/actions", {"config_digest": digest(config),
-        "snapshot_sha256": sha(root / "snapshot.json"), "checkpoints_sha256": checkpoints, "phase": "test"})
+    from .interactive_empty_memory import training_artifacts
+    checkpoints, skipped = training_artifacts(config, name)
+    identity = {"config_digest": digest(config), "snapshot_sha256": sha(root / "snapshot.json"),
+                "checkpoints_sha256": checkpoints, "phase": "test"}
+    if skipped:
+        identity["untrained_methods"] = skipped
+    store = ActionStore(root / "evaluation/actions", identity)
     gates = learned_gates(config, name)
     runner = NativeRunner(config, root, memory)
     data = config["experiments"][name]
@@ -253,6 +258,10 @@ def evaluate(config, name):
                      current_task=task_id, current_policy="KEEP_ALL")
             baseline = baseline_for(runner, store, tasks[task_id], seed)
             ids = [c["memory_id"] for c in baseline["candidates"]]
+            if not ids:
+                print(f"[空记忆] {task_id}：八策略共享同一无记忆结果，保留测评任务。", flush=True)
+            elif skipped:
+                raise ValueError("test retrieved nonempty candidates but some gates have no training supervision")
             actions = [(baseline, [])]
             for candidate_number, candidate in enumerate(ids):
                 progress(root, "evaluate", current_policy=f"SINGLE_DROP {candidate_number+1}/{len(ids)}")
@@ -297,6 +306,11 @@ def evaluate(config, name):
             oracle["post_hoc"] = True
             oracle["primary_selection_metric"] = "success"
             records.append(oracle)
+            for record in records:
+                record["candidate_status"] = "available" if ids else "empty"
+                if record["policy"] in skipped:
+                    record["gate_training_status"] = skipped[record["policy"]]["status"]
+                    record["gate_applied"] = False
             save(part, records)
             completed.extend(records)
             progress(root, "evaluate", completed=index+1, total=len(data["split"]["test"]), current_task=task_id)
@@ -304,7 +318,8 @@ def evaluate(config, name):
     finally:
         runner.close()
         for gate in gates.values():
-            gate.close()
+            if gate is not None:
+                gate.close()
     snapshot(config, name)
 
 

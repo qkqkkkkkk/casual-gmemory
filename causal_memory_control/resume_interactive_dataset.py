@@ -50,9 +50,8 @@ def registered_config(root, dataset):
         raise ValueError("this entry point requires a fixed-holdout dataset, not PDDL CV folds")
     if not config.get("exclude_ce") or not config.get("include_local_global_team_u"):
         raise ValueError("this entry point requires the registered eight-policy no-CE experiment")
-    for path, expected in config["code_sha256"].items():
-        if sha(Path(config["repo"]) / path) != expected:
-            raise ValueError(f"registered implementation changed: {path}")
+    from .interactive_empty_memory import verify_registered_code
+    verify_registered_code(config)
     for task in config["experiments"][dataset]["tasks"]:
         for path, expected in task["files"].items():
             if sha(Path(config["repo"]) / path) != expected:
@@ -166,10 +165,17 @@ def dataset_report(config, dataset):
                                                          for s in config["random_seeds"]}
     results["random_drop"]["random_seed_success_stdev"] = statistics.stdev(
         results[f"random_drop_seed{s}"]["success"] for s in config["random_seeds"])
+    from .interactive_empty_memory import training_artifacts, upgrade_provenance
+    checkpoints, skipped = training_artifacts(config, dataset)
+    for method in skipped:
+        if any(r["retrieved_count"] or r.get("gate_training_status") !=
+               "skipped_no_candidate_supervision" for r in groups[method].values()):
+            raise ValueError("untrained gate results must be explicitly marked empty-only")
     payload = {"schema": "interactive-dataset-only-report-v1", "dataset": dataset,
         "config_digest": digest(config), "manifest_sha256": sha(Path(config["output_dir"]) / "benchmark_manifest.json"),
         "evaluation_log_sha256": sha(source), "snapshot_sha256": sha(root / "snapshot.json"),
-        "checkpoints_sha256": {m: sha(root / m / "checkpoint.json") for m in learned_methods(config)},
+        "checkpoints_sha256": checkpoints, "untrained_methods": skipped,
+        "implementation_upgrade": upgrade_provenance(config),
         "primary_test_ids": sorted(primary), "test_cohorts": cohorts,
         "bootstrap": "paired_cluster_percentile_2000_resamples_seed71_by_scene_or_problem",
         "interpretation": "dataset-only report; other registered datasets remain paused; Oracle is post hoc",

@@ -16,13 +16,28 @@ def diagnostic_lists(root, data):
     for task_id in expected:
         path = Path(root) / "diagnostic/tasks" / (digest(task_id) + ".json")
         row = json.loads(path.read_text())
-        if row["task_id"] != task_id or not row["candidates"]:
-            raise ValueError(f"missing/empty diagnostic candidate list: {task_id}")
+        if row["task_id"] != task_id or not isinstance(row["candidates"], list):
+            raise ValueError(f"invalid diagnostic candidate list: {task_id}")
+        if len(row["q_drop"]) != len(row["candidates"]):
+            raise ValueError(f"misaligned diagnostic candidate labels: {task_id}")
+        if not row["candidates"] and (row["drop_samples"] or row["branches"]):
+            raise ValueError(f"empty diagnostic list has fabricated DROP labels: {task_id}")
         rows.append(row)
     return rows
 
 
 def reward_train(config, name):
+    from .interactive_empty_memory import coverage, save_skip
+
+    root = Path(config["output_dir"]) / name
+    data = config["experiments"][name]
+    rows = diagnostic_lists(root, data)
+    counts = coverage(rows, data)
+    if not any(counts[part]["candidate_count"] for part in counts):
+        save_skip(config, name, rows, ("semantic_linear", "semantic_mlp", "semantic_st"))
+        return
+    if not counts["fit"]["candidate_count"] or not counts["dev"]["candidate_count"]:
+        raise ValueError("nonempty candidates require fit and dev supervision; no untrained gate fallback")
     from .estimator import AmortizedUtilityEstimator, PotentialOutcomeExample
     from .neural_estimator import MLPUtilityEstimator
     from .st_estimator import STUtilityEstimator
@@ -30,9 +45,6 @@ def reward_train(config, name):
     from .runtime_gate import save_gate_checkpoint
     from .train_gate import _calibrate_policy
 
-    root = Path(config["output_dir"]) / name
-    data = config["experiments"][name]
-    rows = diagnostic_lists(root, data)
     encoder = SentenceTransformerEmbedder(config["embedding_model"], cache_path=root / "semantic.sqlite")
     builder = SemanticTeamFeatureBuilder(encoder)
     examples = []
@@ -53,7 +65,8 @@ def reward_train(config, name):
         fit_ids, dev_ids = set(data["split"]["fit"]), set(data["split"]["dev"])
         fit = [e for e in examples if e.group_id in fit_ids]
         dev = [e for e in examples if e.group_id in dev_ids]
-        if {e.group_id for e in fit} != fit_ids or {e.group_id for e in dev} != dev_ids:
+        if ({e.group_id for e in fit} != set(counts["fit"]["supervised_task_ids"])
+                or {e.group_id for e in dev} != set(counts["dev"]["supervised_task_ids"])):
             raise ValueError("reward training lacks fit/dev coverage")
         kwargs = dict(ensemble_size=config["ensemble_size"], min_samples=8, seed=23, residual_noise_scale=0.0)
         factories = {
@@ -83,6 +96,7 @@ def reward_train(config, name):
             metadata = {**provenance, "dataset": name, "metric": "success", "training_task_ids": sorted(fit_ids | dev_ids),
                 "fit_task_ids": sorted(fit_ids), "dev_task_ids": sorted(dev_ids),
                 "test_task_ids": data["split"]["test"], "training_events": len(examples),
+                "candidate_coverage": counts,
                 "label_definition": "mean_success_KEEP_ALL-minus-mean_success_SINGLE_DROP",
                 "policy_calibration": calibration, "method": method,
                 "candidate_kinds": sorted({c["memory_type"] for r in rows for c in r["candidates"]})}
@@ -263,6 +277,11 @@ def csm_train(config, name):
 
 
 def learned_gates(config, name):
+    from .interactive_empty_memory import validated_skip
+
+    skipped = {method for method in learned_methods(config) if validated_skip(config, name, method)}
+    if len(skipped) == len(learned_methods(config)):
+        return {method: None for method in learned_methods(config)}
     from .runtime_gate import GMemoryExposureGate
     from .csm_st_runtime import CSMExposureGate
 
@@ -279,6 +298,9 @@ def learned_gates(config, name):
         encoder.close()
     gates = {}
     for method in learned_methods(config):
+        if method in skipped:
+            gates[method] = None
+            continue
         path = root / method / "checkpoint.json"
         payload = json.loads(path.read_text())
         metadata = payload["training_metadata"]
@@ -316,6 +338,10 @@ def learned_gates(config, name):
 
 
 def select(gate, baseline):
+    if not baseline["candidates"]:
+        return [], []
+    if gate is None:
+        raise ValueError("nonempty test candidates require a trained gate; no-supervision fallback is empty-only")
     from .types import ExposureAction
 
     if getattr(gate, "interactive_target", None) == "team_u":
