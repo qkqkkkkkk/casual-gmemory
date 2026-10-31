@@ -564,3 +564,46 @@ bash causal_memory_control/run_interactive_expanded_v8.sh all 2>&1 | tee -a /mnt
 无需删除 v9、手工编辑 manifest、清空模型缓存或改随机种子。若迁移校验拒绝，保留错误以便核对，不绕过哈希检查。新流程仍可能有模型任务失败；格式 warning 本身不再导致整个实验退出。
 
 本地针对性回归共 25 项通过：动作/请求错误 7 项、迁移 6 项、八策略/终端进度及原生回放/事务恢复/采集测评 12 项。迁移测试包含源文件内容不变、模型回复缓存保留、仅补未完成任务、已有冻结快照可恢复、拒绝未知源码或篡改产物、运行锁、复制失败清理，以及迁移后的配置能被正式 CLI 接受。ALFWorld 格式回归使用假 TextWorld 反馈验证原生 MacNet/适配器行为；未调用服务器 Qwen 或运行远程实验。
+
+### 暂停 PDDL，保留 v10 全部进度并只续跑 ALFWorld
+
+若某个 PDDL 折的 support 缺少成功记忆，诊断采集会报 `no diagnostic candidates`。这不要求删除结果或重新执行已完成的 ALFWorld support。新增 `resume_interactive_dataset.py` 读取现有根目录的原始 manifest，执行其中已注册的 ALFWorld 阶段；不重建 split、不缩减 manifest 的 experiments、不重绑定任何已提交结果摘要。直接给原主入口改 `--datasets alfworld` 会改变配置身份，不能用于当前混合目录的续跑。
+
+新文件不属于被登记的 `interactive_*.py` 或原主入口；本次仅增加独立调度与报告工具，原采样、support、诊断、训练、测评源码保持不变。因此不用再次迁移 v10，也不会让已有测量的源码指纹失配。每个 worker 仍核对原 manifest 的源码、任务文件和服务模型身份。
+
+真正执行前获取与原启动器相同的根目录 sidecar 锁，先完整复制当前 v10 目录到同级 `.backup-before-alfworld-日期时间-随机串` 目录，保留 PDDL 各折、ALFWorld、所有缓存、日志、manifest 和进度文件。复制有文件计数进度条，磁盘空间不足或复制失败时不启动实验，源结果保持原样。后续同命令重启默认复用首次备份；可用 `--backup-dir` 显式创建额外备份，目标必须是不存在的独立路径。备份含 SQLite/WAL 原文件，只有在停止旧实验并取得排他锁后复制；不应直接在备份路径运行原配置，因为原 manifest 登记的是 v10 路径。
+
+ALFWorld 按 `support → collect → labels_team_u → train_reward → train_team_u → evaluate → report` 继续，保持八策略且跳过 CE。support 已完整冻结时直接复用，部分提交则从未完成任务继续；诊断/测评复用原有提交和动作缓存，未提交任务从原任务边界补跑。PDDL 各折及根 `pipeline_progress.json` 原样保留，ALFWorld 单独调度进度保存在 `dataset_resume/alfworld/progress.json`，逐阶段日志继续追加到 `alfworld/logs/` 并实时输出。
+
+原联合 report 会要求 PDDL 测评完整，因此单独生成 `alfworld/dataset_report/comparison.json`、`.csv`、`.md`，保留根联合结果表。此报告使用原混合配置摘要，校验策略/任务完整覆盖、配对身份和 no-DROP 一致性，复用原 scene-cluster bootstrap 统计函数。134 个 valid_unseen 为主表，500 个 train_scene_holdout 分开报告，不合并为官方 unseen 成绩。
+
+本地仅上传本次四个文件，命令逐条执行：
+
+```bash
+git add causal_memory_control/resume_interactive_dataset.py causal_memory_control/tests/test_resume_interactive_dataset.py causal_memory_control/interactive_v8_upload_files.txt causal_memory_control/PDDL_ALFWORLD_EXPANDED.md
+git commit -m "Resume ALFWorld alone with full experiment backup"
+git push origin main
+```
+
+服务器先确认旧实验入口没有实际 PID；不要并发操作结果目录，再拉取。源码若有未提交修改，先核对保留，不强制覆盖：
+
+```bash
+cd /mnt/mydata/hjq/casual-gmemory
+pgrep -af 'causal_memory_control\.(run_interactive_gate_benchmark|interactive_worker|interactive_envs|resume_interactive_dataset)'
+git pull --ff-only origin main
+python -m unittest causal_memory_control.tests.test_resume_interactive_dataset -q
+```
+
+可先只读检查执行计划，不备份、不写结果、不调用模型/服务：
+
+```bash
+python -m causal_memory_control.resume_interactive_dataset --output-dir /mnt/mydata/hjq/casual-gmemory/causal_memory_control/results/pddl_alfworld_gate_expanded_v10_formatwarn_no_ce --dataset alfworld --plan-only
+```
+
+正式只续跑 ALFWorld（仍在同一个 v10 根目录，自动备份，不用 smoke 或重新采样）：
+
+```bash
+CUDA_VISIBLE_DEVICES="${CMC_INTERACTIVE_GPU:-0}" python -u -X faulthandler -m causal_memory_control.resume_interactive_dataset --output-dir /mnt/mydata/hjq/casual-gmemory/causal_memory_control/results/pddl_alfworld_gate_expanded_v10_formatwarn_no_ce --dataset alfworld --stage all
+```
+
+终端出现 `[备份完成]` 后才继续校验服务及执行阶段。以后中断仍用同一命令续跑，不重复迁移、不删除 PDDL、也不回到会先跑 PDDL 的原 `all` 启动器。当前只暂停 PDDL，空候选原因仍留待单独排查；ALFWorld 自身若也有空候选或请求错误仍会如实停止，不跳过失败任务。
