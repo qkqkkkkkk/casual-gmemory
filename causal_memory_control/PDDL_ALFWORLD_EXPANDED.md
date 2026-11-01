@@ -695,3 +695,49 @@ CUDA_VISIBLE_DEVICES=0 python -u -X faulthandler -m causal_memory_control.contin
 如果仍先跑 ALFWorld，把 --datasets pddl 改为 --datasets alfworld；两个都接着跑用 --datasets pddl,alfworld。所有情况都沿用相同 v10 根目录，不用新建 v11，不删失败折，不重复 smoke。中断后原命令可再次执行，完整备份只做一次。仅选择一个数据集时，表格输出到 empty_memory_upgrade/report_pddl 或 report_alfworld，不覆盖根目录的合并表；全部选择时才生成完整合并表。
 
 终端会显示“空记忆……保存无记忆基线”“候选监督为 0，记录未训练；不创建 checkpoint”等明确状态，阶段进度条继续显示。此修复处理空候选流程，不会自动修正 Gripper 轨迹中机器人房间、持球状态、think 输出及动作前置条件推理错误。
+
+### ALFWorld 配对检索顺序漂移（2026-11-01）
+
+`original retrieval changed before exposure` 表示 SINGLE DROP 分支删除前的原始候选与已保存 KEEP 基线不一致，程序尚未让该分支暴露记忆就停止。原始日志未包含候选差异，不能只凭它断定是顺序、成员或内容变化。原生检索中存在集合遍历、并列相似度排序和向量查询，候选顺序可能漂移；即使设置相同 Python/NumPy/Torch seed 也不控制所有此类排序。
+
+修复保留每次原生检索，只在 query、state、候选成员、内容及除 retrieval_index 外的元数据完全一致时，将原始对象重新排列为该任务首次已测 KEEP 的顺序，再执行门控。重新适配后所有候选（包括排名）及检索指纹仍必须与基线完全一致。候选增加/缺失、内容或元数据变化仍然终止，不替换候选、不重试直到“碰巧匹配”、不删除基线。跨诊断 repeats 及从缓存恢复也沿用首次基线顺序；重复候选保留其数量，不作额外去重。
+
+对齐记录及真实不一致的详细记录保存到 `alfworld/retrieval_checks/*.json`，含 task_id、seed、drop_ids 和 expected/observed 的完整候选。成功对齐时终端显示 `[检索对齐]`；真实变化时报错包含 `details=...`。因此这是顺序漂移的修复，也增加了真实差异的定位信息，不保证所有检索不一致都能继续。
+
+本次更新文件：`interactive_runtime.py`、`continue_interactive_empty_memory.py`、`tests/test_interactive_retrieval.py`、`tests/test_continue_interactive_empty_memory.py`、本文和 `interactive_v8_upload_files.txt`。原 v10 manifest、PDDL 报表、support、checkpoint 和动作缓存保持原样；入口只接受已知 v1 登记并将其存档为 `empty_memory_upgrade/registration_v1.json`，再登记本次 v2 升级。未知源码或登记仍拒绝。已有完整备份继续复用，不另做整目录备份。未完成 episode 可以重跑，已提交任务和动作分支继续复用。
+
+本地手动提交这次文件（不包含结果或无关修改），再按现有分支上传；本说明不会自动执行上传：
+
+```bash
+git add causal_memory_control/interactive_runtime.py causal_memory_control/continue_interactive_empty_memory.py causal_memory_control/tests/test_interactive_retrieval.py causal_memory_control/tests/test_continue_interactive_empty_memory.py causal_memory_control/PDDL_ALFWORLD_EXPANDED.md causal_memory_control/interactive_v8_upload_files.txt
+```
+
+```bash
+git commit -m "Preserve measured candidate order in matched interactive branches"
+```
+
+```bash
+git push
+```
+
+服务器在实验已退出后，在 `/mnt/mydata/hjq/casual-gmemory` 执行 `git pull --ff-only`，再检查本次修复及续跑计划：
+
+```bash
+python -m unittest causal_memory_control.tests.test_interactive_retrieval causal_memory_control.tests.test_continue_interactive_empty_memory -q
+```
+
+```bash
+python -m causal_memory_control.continue_interactive_empty_memory --output-dir /mnt/mydata/hjq/casual-gmemory/causal_memory_control/results/pddl_alfworld_gate_expanded_v10_formatwarn_no_ce --datasets alfworld --plan-only
+```
+
+只继续 ALFWorld 的全部阶段；已完成的 PDDL 不重新执行：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -u -X faulthandler -m causal_memory_control.continue_interactive_empty_memory --output-dir /mnt/mydata/hjq/casual-gmemory/causal_memory_control/results/pddl_alfworld_gate_expanded_v10_formatwarn_no_ce --datasets alfworld --stage all
+```
+
+如仍有真实候选差异，复制报错中 `details=` 指向的 JSON，或在项目根目录只读打印最新检查记录：
+
+```bash
+python -c 'import json; from pathlib import Path; r=Path("causal_memory_control/results/pddl_alfworld_gate_expanded_v10_formatwarn_no_ce/alfworld/retrieval_checks"); p=max(r.glob("*.json"),key=lambda p:p.stat().st_mtime); print(p); print(json.dumps(json.loads(p.read_text()),ensure_ascii=False,indent=2))'
+```

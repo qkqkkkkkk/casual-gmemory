@@ -38,6 +38,38 @@ def fixture(directory):
 
 
 class ContinueEmptyMemoryTests(unittest.TestCase):
+    def test_v1_registration_is_archived_and_existing_results_and_backup_are_reused(self):
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
+            root, config = fixture(directory)
+            jobs = [(root, config)] + [(Path(child["output_dir"]), child)
+                                      for _, child in cli.dataset_jobs(config, "pddl")]
+            originals = {}
+            for path, job in jobs:
+                old = upgrade.previous_registration(job, upgrade.upgrade_registration(job))
+                originals[path] = old
+                save(path / "empty_memory_upgrade/registration.json", old)
+            before = files_identity(root)
+            upgrade.continue_run(root, datasets=("alfworld",), plan_only=True)
+            self.assertEqual(files_identity(root), before)
+            backup = upgrade.backup_results(root, "empty-memory-upgrade", config)
+            with mock.patch.object(upgrade, "run_logged") as run:
+                state = upgrade.continue_run(root, datasets=("alfworld",), stage="collect")
+                run.assert_called_once()
+                self.assertEqual(Path(state["backup_dir"]), backup)
+                for path, job in jobs:
+                    self.assertEqual(json.loads((path / "empty_memory_upgrade/registration_v1.json").read_text()),
+                                     originals[path])
+                    self.assertEqual(json.loads((path / "empty_memory_upgrade/registration.json").read_text()),
+                                     upgrade.upgrade_registration(job))
+                    empty.verify_registered_code(job)
+                upgraded = files_identity(root)
+                upgrade.continue_run(root, datasets=("alfworld",), stage="collect")
+                self.assertEqual(files_identity(root), upgraded)
+            for path, value in before.items():
+                if not path.endswith("empty_memory_upgrade/registration.json"):
+                    self.assertEqual(sha(root / path), value, path)
+            self.assertEqual(files_identity(backup), before)
+
     def test_reviewed_target_hashes_match_the_actual_upgrade(self):
         for path, (_, after) in upgrade.UPGRADE.items():
             self.assertEqual(sha(REPO / path), after, path)

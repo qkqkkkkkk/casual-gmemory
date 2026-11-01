@@ -19,8 +19,8 @@ from .resume_interactive_dataset import backup_results, experiment_lock
 from .run_interactive_gate_benchmark import dataset_jobs
 
 
-# Only these reviewed stage changes are compatible with v10 measurements.
-# Native prompts, actions, memory writes, seeds and LLM calls are unchanged.
+# Reviewed changes compatible with v10 measurements. Native retrieval runs as
+# before; identical candidates may be restored to their measured prompt order.
 UPGRADE = {
     "causal_memory_control/interactive_worker.py": (
         "6481014752eeb934ee64981b978703e24a6e7a7a5f952b57a2855aa62d073574",
@@ -34,10 +34,14 @@ UPGRADE = {
     "causal_memory_control/interactive_report.py": (
         "76f217fa8ce8a85f2927e18c94c9dc376bc076729cba5017a2dc10ef456c73f8",
         "6cbaa9eeda9f1ae0d48f554b75d55865482ed8e4419a47217dfee9786d4dc3ba"),
+    "causal_memory_control/interactive_runtime.py": (
+        "d984bfc1fa332500053214d42703ac3af8c10672b28fb195d129202d68321d0a",
+        "e0ba52f733e1a005f316cd5de876c6b8faeca2fdc1d29df35fb622fe1fbd462d"),
 }
 HELPERS = ("causal_memory_control/interactive_empty_memory.py",
            "causal_memory_control/continue_interactive_empty_memory.py",
            "causal_memory_control/resume_interactive_dataset.py")
+PREVIOUS_ENTRY_SHA256 = "e3298c92efec7c6108676cb2756273e6f2398907fe8dd728ec35e23f7e341d18"
 
 
 def upgrade_registration(config):
@@ -51,11 +55,41 @@ def upgrade_registration(config):
     for path, expected in config["code_sha256"].items():
         if path not in UPGRADE and sha(repo / path) != expected:
             raise ValueError(f"unrelated registered implementation changed: {path}")
-    return {"schema": "interactive-empty-memory-upgrade-v1", "config_digest": digest(config),
+    return {"schema": "interactive-empty-memory-upgrade-v2", "config_digest": digest(config),
         "original_code_sha256": config["code_sha256"],
         "effective_code_sha256": {path: sha(repo / path) for path in sorted(set(config["code_sha256"]) | set(HELPERS))},
-        "compatibility": "native episodes and action identities unchanged; empty lists retained; no fabricated supervision",
+        "compatibility": ("original measured candidate/prompt order and action identities retained; "
+                          "permutations of identical candidates aligned; genuine retrieval changes rejected; "
+                          "empty lists retained; no fabricated supervision"),
         "original_manifest_immutable": True}
+
+
+def previous_registration(config, current):
+    """Reconstruct the exact reviewed v1 sidecar, including its helper hash."""
+    effective = dict(current["effective_code_sha256"])
+    effective["causal_memory_control/interactive_runtime.py"] = UPGRADE[
+        "causal_memory_control/interactive_runtime.py"][0]
+    effective["causal_memory_control/continue_interactive_empty_memory.py"] = PREVIOUS_ENTRY_SHA256
+    return {**current, "schema": "interactive-empty-memory-upgrade-v1", "effective_code_sha256": effective,
+        "compatibility": "native episodes and action identities unchanged; empty lists retained; no fabricated supervision"}
+
+
+def check_registration(directory, config, current):
+    path = directory / "empty_memory_upgrade/registration.json"
+    if path.exists() and json.loads(path.read_text()) not in (current, previous_registration(config, current)):
+        raise ValueError(f"existing upgrade registration differs: {path}")
+
+
+def register(directory, config, current):
+    check_registration(directory, config, current)
+    path = directory / "empty_memory_upgrade/registration.json"
+    if path.exists() and json.loads(path.read_text()) != current:
+        # Preserve provenance of results already produced under v1. Never edit
+        # the original experiment manifest, cached episodes or model artifacts.
+        locked(path.with_name("registration_v1.json"), json.loads(path.read_text()))
+        save(path, current)
+    else:
+        locked(path, current)
 
 
 def preflight(root):
@@ -63,6 +97,7 @@ def preflight(root):
     if Path(config["output_dir"]).resolve() != root:
         raise ValueError("registered output directory differs from requested root")
     registration = upgrade_registration(config)
+    check_registration(root, config, registration)
     jobs = []
     for name, data in config["experiments"].items():
         for task in data["tasks"]:
@@ -78,9 +113,7 @@ def preflight(root):
             elif directory.exists() and any(directory.iterdir()):
                 raise ValueError(f"existing fold data lacks its original manifest: {directory}")
             record = upgrade_registration(child)
-            prior = directory / "empty_memory_upgrade/registration.json"
-            if prior.exists() and json.loads(prior.read_text()) != record:
-                raise ValueError(f"existing upgrade registration differs: {prior}")
+            check_registration(directory, child, record)
             jobs.append((name, label, child, record))
     return config, registration, jobs
 
@@ -113,8 +146,8 @@ def continue_run(root, *, datasets=("pddl", "alfworld"), stage="all", plan_only=
         for _, _, child, record in jobs:
             directory = Path(child["output_dir"])
             locked(directory / "benchmark_manifest.json", child)
-            locked(directory / "empty_memory_upgrade/registration.json", record)
-        locked(root / "empty_memory_upgrade/registration.json", registration)
+            register(directory, child, record)
+        register(root, config, registration)
         state_path = root / "empty_memory_upgrade/progress.json"
         state = {"config_digest": digest(config), "datasets": selected, "backup_dir": str(backup),
                  "stages": selected_stages, "completed": [], "status": "running"}

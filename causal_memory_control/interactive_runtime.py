@@ -80,6 +80,60 @@ def candidate_rows(retrieval):
              "content": c.content, "metadata": dict(c.metadata)} for c in retrieval.candidates]
 
 
+def retrieval_check(adapter, result, reference, *, query_task, task_state, root, task_id, seed, drops):
+    """Restore a measured candidate order only when every item still matches.
+
+    A new native retrieval still runs in each episode. Only a permutation of
+    identical candidates may be aligned to the original prompt; changes in
+    membership, content, non-rank metadata or public context remain fatal.
+    """
+    if reference is None:
+        return result
+    from collections import Counter, defaultdict, deque
+
+    retrieval = adapter.adapt(result)
+    observed = candidate_rows(retrieval)
+    expected = reference["candidates"]
+    context_matches = query_task == reference["query"] and task_state == reference["state"]
+    if context_matches and observed == expected:
+        return result
+
+    def item_key(row):
+        return digest({**row, "metadata": {k: v for k, v in row["metadata"].items()
+                                           if k != "retrieval_index"}})
+
+    aligned = None
+    if (context_matches and not result[1]
+            and Counter(map(item_key, observed)) == Counter(map(item_key, expected))):
+        objects = defaultdict(deque)
+        for candidate, raw in zip(observed, [*result[0], *result[2]]):
+            objects[item_key(candidate)].append(raw)
+        successful, insights = [], []
+        for candidate in expected:
+            raw = objects[item_key(candidate)].popleft()
+            (successful if candidate["memory_type"] == "trajectory" else insights).append(raw)
+        proposed = (successful, list(result[1]), insights)
+        if candidate_rows(adapter.adapt(proposed)) == expected:
+            aligned = proposed
+
+    classification = ("order_aligned_to_baseline" if aligned is not None else
+                      "public_context_changed" if not context_matches else "candidate_data_changed")
+    details = {"schema": "interactive-retrieval-check-v1", "task_id": task_id, "seed": seed,
+        "drop_ids": sorted(drops), "classification": classification,
+        "expected": {"query": reference["query"], "state": reference["state"], "candidates": expected},
+        "observed": {"query": query_task, "state": task_state, "candidates": observed},
+        "expected_ids": [c["memory_id"] for c in expected],
+        "observed_ids": [c["memory_id"] for c in observed]}
+    path = Path(root) / "retrieval_checks" / (digest([task_id, seed, sorted(drops)]) +
+                                              "-" + uuid.uuid4().hex[:8] + ".json")
+    save(path, details)
+    if aligned is not None:
+        print(f"[检索对齐] {task_id}：候选内容一致，恢复已测基线顺序；详情：{path}", flush=True)
+        return aligned
+    raise ValueError(f"original retrieval changed before exposure: {classification}; "
+                     f"task={task_id}; details={path}")
+
+
 def event_from_row(row, index):
     from .types import MemoryCandidate, RetrievalMetadata, TeamMemoryExposureEvent
     from .features import task_context_metadata
@@ -165,6 +219,7 @@ class NativeRunner:
         from mas.utils import EmbeddingFunc
 
         self.config, self.root = config, Path(dataset_root)
+        self._retrieval_references = {}
         self.memory_dir = Path(memory_dir)
         if not writable:
             # Chroma may update SQLite bookkeeping even on read-only logical
@@ -217,6 +272,9 @@ class NativeRunner:
         from .types import ExposureAction
         from dataclasses import replace
 
+        if expected is not None:
+            self.remember_retrieval(expected)
+        reference = self._retrieval_references.get(task["id"])
         random.seed(seed)
         np.random.seed(seed)
         import torch
@@ -237,21 +295,23 @@ class NativeRunner:
                                else ExposureAction.KEEP, reason="registered_fixed_action")
 
             def filter_retrieval(gate, result, **kwargs):
-                gate.raw_candidates = candidate_rows(gate.adapter.adapt(result))
                 if getattr(gate, "retrieval_calls", 0):
                     raise ValueError("only one retrieval per episode is registered")
                 gate.retrieval_calls = 1
+                result = retrieval_check(gate.adapter, result, reference,
+                    query_task=kwargs["query_task"], task_state=kwargs.get("task_state", ""),
+                    root=self.root, task_id=task["id"], seed=seed, drops=drops)
+                gate.raw_candidates = candidate_rows(gate.adapter.adapt(result))
                 filtered = super().filter_retrieval(result, **kwargs)
-                if expected and (gate._retrieval_fingerprint != expected["retrieval_fingerprint"]
-                                 or gate.raw_candidates != expected["candidates"]):
-                    raise ValueError("original retrieval changed before exposure")
+                if reference and gate._retrieval_fingerprint != reference["retrieval_fingerprint"]:
+                    raise ValueError(f"original retrieval fingerprint changed before exposure: task={task['id']}")
                 if not set(drops) <= {r["memory_id"] for r in gate.raw_candidates}:
                     raise ValueError("DROP refers to an unavailable memory")
                 return filtered
 
         episode = Episode(task, self.config["repo"], self.config["max_steps"])
         try:
-            if expected and expected["initial_fingerprint"] != episode.initial_fingerprint:
+            if reference and reference["initial_fingerprint"] != episode.initial_fingerprint:
                 raise ValueError("initial environment differs from matched baseline")
             task_config = {**task["config"], "task_main": episode.task_main,
                 "task_description": episode.task_description,
@@ -298,6 +358,7 @@ class NativeRunner:
                 "task_state_policy": "isolated_episode_rng_environment_memory_nodes_v1"}
             if expected:
                 audit(row, expected, drops)
+            self.remember_retrieval(row)
             return row
         finally:
             episode.close()
@@ -305,6 +366,14 @@ class NativeRunner:
 
     def close(self):
         self.client.close()
+
+    def remember_retrieval(self, row):
+        """Pin repeats to the first measured list, including after cache resume."""
+        reference = {k: row[k] for k in ("query", "state", "candidates", "retrieval_fingerprint",
+                                         "initial_fingerprint")}
+        prior = self._retrieval_references.setdefault(row["task_id"], reference)
+        if prior != reference:
+            raise ValueError(f"cached baseline retrieval changed across repeats: task={row['task_id']}")
 
     def _raise_request_failure(self, task_id):
         error = self.client.last_branch_error
@@ -332,9 +401,13 @@ def baseline_for(runner, store, task, seed):
         row = store.get(task["id"], seed, baseline, [])
         if row is None:
             raise ValueError("baseline index points to a missing measured outcome")
+        if hasattr(runner, "remember_retrieval"):
+            runner.remember_retrieval(row)
         return row
     row = store.put(runner.run(task, seed))
     save(path, row)
+    if hasattr(runner, "remember_retrieval"):
+        runner.remember_retrieval(row)
     return row
 
 
