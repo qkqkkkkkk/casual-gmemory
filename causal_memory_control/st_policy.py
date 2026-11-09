@@ -9,12 +9,34 @@ from .runtime_gate import GMemoryExposureGate
 from .types import ExposureAction
 
 
-RULES = ("calibrated", "positive_unlimited")
+RULES = ("dataset_default", "calibrated", "positive_unlimited")
+DATASET_RULES = {
+    "fever": "calibrated",
+    "hotpotqa": "positive_unlimited",
+    "pddl": "positive_unlimited",
+}
 POSITIVE_POLICY = {
     "rule": "positive_unlimited", "keep_condition": "predicted_U > 0",
     "drop_condition": "predicted_U <= 0", "kappa": 0.0, "delta": 0.0,
     "max_drops": None, "semantic_dedup": False, "retraining": False,
 }
+
+
+def resolve_rule(rule, dataset):
+    """Use the declared dataset mapping; never select a rule from task scores."""
+    if rule not in RULES:
+        raise ValueError(f"unsupported Semantic ST deletion rule: {rule}")
+    if rule == "dataset_default":
+        if dataset not in DATASET_RULES:
+            raise ValueError(f"no default Semantic ST deletion rule registered for {dataset}")
+        return DATASET_RULES[dataset]
+    return rule
+
+
+def policy_spec(rule, dataset):
+    if resolve_rule(rule, dataset) == "positive_unlimited":
+        return dict(POSITIVE_POLICY)
+    return {"rule": "calibrated", "settings": "unchanged saved kappa/delta/budget"}
 
 
 def positive_decisions(decisions):

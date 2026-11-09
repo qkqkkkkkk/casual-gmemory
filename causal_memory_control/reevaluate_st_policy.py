@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 from .interactive_data import digest, locked, save, sha
 from .interactive_progress import run_logged, show_progress
-from .st_policy import POSITIVE_POLICY, RULES, positive_decisions, validate_st_checkpoint
+from .st_policy import RULES, policy_spec, positive_decisions, resolve_rule, validate_st_checkpoint
 
 
 SCHEMA = "semantic-st-policy-reevaluation-v1"
@@ -60,6 +60,7 @@ def prepare_qa(suite, name, identity):
     from .source_run import import_source_dataset
     from .task_state import validate_task_state_policy
 
+    rule = resolve_rule(suite.st_deletion_rule, name)
     previous = suite.qa_root / name
     old, baseline = previous / "semantic_st", previous / "native_gmemory"
     reevaluation = suite.qa_root / "reevaluation_manifest.json"
@@ -90,7 +91,7 @@ def prepare_qa(suite, name, identity):
     args.gate_evaluation_seed = previous_run["seed"]
     args.output_dir = suite.output_dir / name
     args.semantic_cache = args.output_dir / "semantic.sqlite"
-    if suite.st_deletion_rule == "positive_unlimited":
+    if rule == "positive_unlimited":
         args.kappa, args.delta, args.max_drops = 0.0, 0.0, -1
     else:
         args.kappa, args.delta, args.max_drops = (previous_run[k] for k in ("kappa", "delta", "max_drops"))
@@ -103,7 +104,7 @@ def prepare_qa(suite, name, identity):
         base = baseline_rows[task_id]
         if row["retrieval_fingerprint"] != base["retrieval_fingerprint"]:
             raise ValueError(f"{name}: previous ST retrieval differs from baseline: {task_id}")
-        drops, _ = selection(row, suite.st_deletion_rule)
+        drops, _ = selection(row, rule)
         planned[task_id] = drops
     for path in (reevaluation, trained, source / "benchmark_manifest.json", args.checkpoint,
                  snapshot_path, old / "run_manifest.json", baseline / "run_manifest.json",
@@ -114,7 +115,7 @@ def prepare_qa(suite, name, identity):
             pin(identity, path)
     for source_path in (suite.qa_root, source, args.checkpoint.parent, args.memory_dir):
         separate_output(suite.output_dir, source_path)
-    plan = {"test_tasks": len(expected), "checkpoint": str(args.checkpoint),
+    plan = {"deletion_rule": rule, "test_tasks": len(expected), "checkpoint": str(args.checkpoint),
         "source_root": str(source), "previous_evaluation": str(old), "prompt_cache": str(cache),
         "seed": args.gate_evaluation_seed, "endpoint": args.endpoint, "model": args.model,
         "changed_drop_tasks": sum(planned[t] != sorted(d["memory_id"] for d in old_rows[t]["decisions"]
@@ -132,6 +133,7 @@ def prepare_pddl(suite, identity):
     from .interactive_worker import snapshot
     from .run_interactive_gate_benchmark import dataset_jobs
 
+    rule = resolve_rule(suite.st_deletion_rule, "pddl")
     root = suite.interactive_root
     config = read(root / "benchmark_manifest.json")
     if Path(config["output_dir"]).resolve() != root:
@@ -193,7 +195,7 @@ def prepare_pddl(suite, identity):
             if (previous_branch is None or old["outcome"] != previous_branch["outcome"]
                     or old["action_keys"] != [previous_branch["action_key"]]):
                 raise ValueError("previous PDDL policy outcome differs from its measured action")
-            drops, decisions = selection(old, suite.st_deletion_rule)
+            drops, decisions = selection(old, rule)
             measured = store.get(task_id, baseline["seed"], baseline, drops)
             for key in {baseline["action_key"], *(old["action_keys"]),
                         *([measured["action_key"]] if measured else [])}:
@@ -201,7 +203,7 @@ def prepare_pddl(suite, identity):
             work.append({"task_id": task_id, "baseline": baseline, "old": old,
                 "drops": drops, "decisions": decisions, "measured": measured})
         jobs.append({"label": label, "config": child, "source": source, "memory": memory, "work": work})
-    plan = {"test_tasks": len(seen), "folds": len(jobs),
+    plan = {"deletion_rule": rule, "test_tasks": len(seen), "folds": len(jobs),
         "reused_measured_actions": sum(w["measured"] is not None for j in jobs for w in j["work"]),
         "maximum_new_episodes": sum(w["measured"] is None for j in jobs for w in j["work"]),
         "changed_drop_tasks": sum(w["drops"] != sorted(w["old"]["drop_ids"]) for j in jobs for w in j["work"])}
@@ -216,8 +218,9 @@ def prepare(suite):
     prepared = {}
     for name in suite.datasets:
         prepared[name] = prepare_pddl(suite, identity) if name == "pddl" else prepare_qa(suite, name, identity)
-    policy = POSITIVE_POLICY if suite.st_deletion_rule == "positive_unlimited" else {
-        "rule": "calibrated", "settings": "unchanged saved kappa/delta/budget"}
+    policy = ({"rule": "dataset_default", "datasets": {
+        name: policy_spec(suite.st_deletion_rule, name) for name in suite.datasets}}
+        if suite.st_deletion_rule == "dataset_default" else policy_spec(suite.st_deletion_rule, suite.datasets[0]))
     manifest = {"schema": SCHEMA, "policy": policy,
         "datasets": {name: item["plan"] for name, item in prepared.items()},
         "source_sha256": identity, "new_training_runs": 0, "new_diagnostic_tasks": 0,
@@ -230,6 +233,7 @@ def run_qa(suite, name, item):
     from .jsonl import read_jsonl
 
     args, adapter = item["args"], item["adapter"]
+    rule = item["plan"]["deletion_rule"]
     # Chroma can write bookkeeping even with logically read-only GMemory.
     # Keep those writes in a private copy, away from every previous result.
     args.memory_dir = private_memory(item["source_memory"], suite.output_dir / name / "frozen_memory/g-memory")
@@ -238,7 +242,7 @@ def run_qa(suite, name, item):
                                      resume=(output / "run_manifest.json").is_file())
     host[host.index("--cache-seed-from") + 1] = str(item["cache"])
     command = [*host[:3], "causal_memory_control.st_policy_evaluate", "--dataset", name,
-               "--st-deletion-rule", suite.st_deletion_rule,
+               "--st-deletion-rule", rule,
                "--st-reference-log", str(item["old"] / "memory_gate.jsonl"), *host[4:]]
     if not adapter.evaluation_complete(args, output, mode="learned", command=host):
         run_logged(command, suite.output_dir / "logs" / (name + ".log"), cwd=Path.cwd())
@@ -256,7 +260,7 @@ def run_qa(suite, name, item):
     save(output / "comparison.json", comparison)
     old_comparison = compare(item["baseline"] / "memory_gate.jsonl", item["old"] / "memory_gate.jsonl",
                              bootstrap_samples=2000, seed=args.gate_evaluation_seed)
-    return {"n": comparison["paired_tasks"], "baseline": comparison["baseline_mean_reward"],
+    return {"runtime_deletion_rule": rule, "n": comparison["paired_tasks"], "baseline": comparison["baseline_mean_reward"],
         "old_st": old_comparison["gate_mean_reward"], "semantic_st": comparison["gate_mean_reward"],
         "metric": "Accuracy" if name == "fever" else "Answer F1", "comparison": comparison,
         "old_answer_em": old_comparison.get("gate_answer_em"), "answer_em": comparison.get("gate_answer_em")}
@@ -291,11 +295,12 @@ def run_pddl(suite, item):
     from .interactive_runtime import ActionStore, NativeRunner, execute
     from .interactive_worker import verify_inputs
 
+    rule = item["plan"]["deletion_rule"]
     records = []
     for job in item["jobs"]:
         config, source = job["config"], job["source"]
         output = suite.output_dir / job["label"]
-        store = ActionStore(output / "actions", {"schema": SCHEMA, "rule": suite.st_deletion_rule,
+        store = ActionStore(output / "actions", {"schema": SCHEMA, "rule": rule,
             "original_action_identity": read(source / "evaluation/actions/identity.json")})
         tasks = {t["id"]: t for t in config["experiments"]["pddl"]["tasks"]}
         runner = None
@@ -311,7 +316,7 @@ def run_pddl(suite, item):
                         copy_cache(source / "responses.sqlite", output / "responses.sqlite")
                         runner = NativeRunner(config, output, job["memory"])
                     branch = execute(runner, store, tasks[work["task_id"]], baseline["seed"], drops, baseline)
-                record = {**work["old"], "policy": "semantic_st", "runtime_deletion_rule": suite.st_deletion_rule,
+                record = {**work["old"], "policy": "semantic_st", "runtime_deletion_rule": rule,
                     "drop_ids": drops, "dropped_count": len(drops), "decisions": work["decisions"],
                     "outcome": branch["outcome"], "action_keys": [branch["action_key"]],
                     "measurement_reused": reused, "source_fold": job["label"],
@@ -327,7 +332,7 @@ def run_pddl(suite, item):
     target.mkdir(parents=True, exist_ok=True)
     (target / "policies.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
     mean = lambda field, metric: statistics.mean(r[field][metric] for r in records)
-    summary = {"n": len(records), "metric": "Success", "baseline": mean("baseline_outcome", "success"),
+    summary = {"runtime_deletion_rule": rule, "n": len(records), "metric": "Success", "baseline": mean("baseline_outcome", "success"),
         "old_st": mean("old_st_outcome", "success"), "semantic_st": mean("outcome", "success"),
         "baseline_progress": mean("baseline_outcome", "progress"),
         "old_st_progress": mean("old_st_outcome", "progress"), "mean_progress": mean("outcome", "progress"),
@@ -351,7 +356,7 @@ def write_report(root, results):
         if name == "pddl":
             metrics.append(("Progress", "baseline_progress", "old_st_progress", "mean_progress"))
         for metric, baseline, old, new in metrics:
-            table.append({"Dataset": name, "Metric": metric, "N": result["n"],
+            table.append({"Dataset": name, "ST rule": result["runtime_deletion_rule"], "Metric": metric, "N": result["n"],
                 "Always Use (%)": 100 * result[baseline] if baseline else None,
                 "Original ST (%)": 100 * result[old], "Selected ST rule (%)": 100 * result[new]})
     with (root / "results.csv").open("w", newline="", encoding="utf-8-sig") as handle:
@@ -374,8 +379,8 @@ def parse_args(argv=None):
     parser.add_argument("--interactive-root", type=Path,
         default=DEFAULT_RESULTS / "pddl_alfworld_gate_expanded_v10_formatwarn_no_ce")
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--st-deletion-rule", choices=RULES, default="calibrated",
-                        help="calibrated preserves the old rule; positive_unlimited keeps only U > 0")
+    parser.add_argument("--st-deletion-rule", choices=RULES, default="dataset_default",
+                        help="default: FEVER calibrated, HotpotQA/PDDL positive_unlimited; explicit rules override all datasets")
     parser.add_argument("--plan-only", action="store_true")
     args = parser.parse_args(argv)
     args.datasets = list(dict.fromkeys(v.strip() for v in args.datasets.split(",") if v.strip()))
