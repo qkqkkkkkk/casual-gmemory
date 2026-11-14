@@ -14,6 +14,7 @@ DATASET_RULES = {
     "fever": "calibrated",
     "hotpotqa": "positive_unlimited",
     "pddl": "positive_unlimited",
+    "alfworld": "calibrated",
 }
 POSITIVE_POLICY = {
     "rule": "positive_unlimited", "keep_condition": "predicted_U > 0",

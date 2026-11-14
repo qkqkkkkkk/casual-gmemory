@@ -23,6 +23,7 @@ from .st_policy import PositiveSTGate, RULES, resolve_rule, validate_st_checkpoi
 
 SCHEMA = "semantic-st-frozen-encoder-comparison-v1"
 DEFAULT_ENCODER = "sentence-transformers/all-mpnet-base-v2"
+INTERACTIVE_DATASETS = ("pddl", "alfworld")
 
 
 def parse_args(argv=None):
@@ -46,8 +47,8 @@ def parse_args(argv=None):
                         help="Explicitly permit fitting a new small head on existing labels; never fits the encoder")
     args = parser.parse_args(argv)
     args.datasets = list(dict.fromkeys(v.strip() for v in args.datasets.split(",") if v.strip()))
-    if not args.datasets or set(args.datasets) - {"fever", "hotpotqa", "pddl"}:
-        parser.error("select fever,hotpotqa,pddl; ALFWorld is never started")
+    if not args.datasets or set(args.datasets) - {"fever", "hotpotqa", "pddl", "alfworld"}:
+        parser.error("select fever,hotpotqa,pddl,alfworld; diagnostic collection is never started")
     if args.stage in ("fit", "all") and not args.plan_only and not args.refit_head:
         parser.error("changing encoder requires a newly fitted ST head; use --stage plan or explicitly --refit-head")
     for key in ("qa_root", "interactive_root", "rule_reference_root", "output_dir"):
@@ -75,10 +76,10 @@ def prepare(args):
     identity = dict(original["source_sha256"])
     jobs = []
     for name, item in prepared.items():
-        if name == "pddl":
+        if name in INTERACTIVE_DATASETS:
             for fold in item["jobs"]:
                 path = fold["source"] / "semantic_st/checkpoint.json"
-                data = fold["config"]["experiments"]["pddl"]
+                data = fold["config"]["experiments"][name]
                 paths = [fold["source"] / "diagnostic/tasks" / (digest(t) + ".json")
                          for t in sorted(data["split"]["fit"] + data["split"]["dev"])]
                 jobs.append({"name": name, "label": fold["label"], "item": fold,
@@ -104,12 +105,12 @@ def prepare(args):
             plans.append({"dataset": job["label"], "head_status": "skipped_no_candidate_supervision"})
             continue
         payload = validate_st_checkpoint(job["checkpoint"])
-        if job["name"] == "pddl":
+        if job["name"] in INTERACTIVE_DATASETS:
             metadata = payload["training_metadata"]
             measured = {reuse.read(p)["task_id"]: sha(p) for p in job["sources"]}
             if (measured != metadata["diagnostic_sha256"] or
                     metadata["config_digest"] != digest(job["item"]["config"])):
-                raise ValueError("PDDL original checkpoint diagnostic labels/configuration changed")
+                raise ValueError("interactive original checkpoint diagnostic labels/configuration changed")
         encoder = payload["feature_builder"]["encoder"]
         if (encoder["model"], encoder.get("revision")) == (args.semantic_model, args.semantic_revision):
             raise ValueError("select a different encoder/revision; this is already the original ST encoder")
@@ -121,7 +122,7 @@ def prepare(args):
             "estimator_config": payload["estimator"]["config"],
             "deletion_rule": resolve_rule(args.st_deletion_rule, job["name"]),
             "deployment_parameters": ({k: getattr(job["item"]["args"], k) for k in ("kappa", "delta", "max_drops")}
-                if job["name"] != "pddl" else payload["training_metadata"]["policy_calibration"]),
+                if job["name"] not in INTERACTIVE_DATASETS else payload["training_metadata"]["policy_calibration"]),
             "calibration": "original numeric kappa/delta/budget reused; no new dev selection"})
     for path in [Path(__file__), *(Path(__file__).with_name(name + ".py") for name in (
             "st_encoder_evaluate", "st_estimator", "semantic_features", "st_data", "train_gate",
@@ -134,8 +135,13 @@ def prepare(args):
         "new_diagnostic_tasks": 0, "encoder_training": False,
         "original_results_overwritten": False, "pddl_requires_original_root_lock": "pddl" in args.datasets,
         "source_sha256": identity}
+    if "alfworld" in args.datasets:
+        manifest["alfworld_requires_original_root_lock"] = True
     # Pin an optional same-rule reference rather than comparing two different policies silently.
     for name in args.datasets:
+        if name == "alfworld":
+            # Its unchanged calibrated reference is the original eight-policy run.
+            continue
         path = args.rule_reference_root / name / ("policies.jsonl" if name == "pddl" else "semantic_st/memory_gate.jsonl")
         if path.is_file():
             reuse.pin(identity, path)
@@ -229,7 +235,7 @@ def fit_head(args, job):
     encoder, identity = checked_encoder(args, job)
     builder = SemanticTeamFeatureBuilder(encoder)
     try:
-        if job["name"] == "pddl":
+        if job["name"] in INTERACTIVE_DATASETS:
             from .interactive_runtime import event_from_row
             config = job["item"]["config"]
             examples, layouts = [], {}
@@ -237,7 +243,7 @@ def fit_head(args, job):
                 row = reuse.read(path)
                 if (row["config_digest"] != digest(config) or row["repeats"] != config["repeats"]
                         or len(row["q_drop"]) != len(row["candidates"])):
-                    raise ValueError("PDDL measured diagnostic configuration/coverage changed")
+                    raise ValueError("interactive measured diagnostic configuration/coverage changed")
                 for i in range(len(row["candidates"])):
                     event = event_from_row(row, i)
                     examples.append(PotentialOutcomeExample(CompactFeatures(builder.build(event), layouts),
@@ -414,13 +420,13 @@ def run_qa(args, name, item, job):
     return result
 
 
-def run_pddl(args, item, jobs):
+def run_pddl(args, item, jobs, *, name="pddl"):
     from .interactive_runtime import ActionStore, NativeRunner, execute
     from .interactive_training import select
     from .interactive_worker import verify_inputs
     from .runtime_gate import GMemoryExposureGate
 
-    rule = resolve_rule(args.st_deletion_rule, "pddl")
+    rule = resolve_rule(args.st_deletion_rule, name)
     records = []
     for job in jobs:
         fold = job["item"]
@@ -439,7 +445,7 @@ def run_pddl(args, item, jobs):
         reference = ActionStore(reference_path, reuse.read(reference_path / "identity.json")) if reference_path else None
         new = ActionStore(output / "actions", {"schema": SCHEMA, "rule": rule,
             "checkpoint_sha256": sha(checkpoint) if checkpoint else None, "original_identity": identity})
-        tasks = {t["id"]: t for t in config["experiments"]["pddl"]["tasks"]}
+        tasks = {t["id"]: t for t in config["experiments"][name]["tasks"]}
         try:
             for work in fold["work"]:
                 baseline = work["baseline"]
@@ -450,7 +456,7 @@ def run_pddl(args, item, jobs):
                 branch = measured or new.get(work["task_id"], baseline["seed"], baseline, drops)
                 if branch is None:
                     if runner is None:
-                        verify_inputs(config, "pddl")
+                        verify_inputs(config, name)
                         reuse.copy_cache(source / "responses.sqlite", output / "responses.sqlite")
                         runner = NativeRunner(config, output, fold["memory"])
                     branch = execute(runner, new, tasks[work["task_id"]], baseline["seed"], drops, baseline)
@@ -464,6 +470,10 @@ def run_pddl(args, item, jobs):
                     "retrieval_fingerprint": baseline["retrieval_fingerprint"], "seed": baseline["seed"],
                     "drop_ids": drops, "decisions": decisions, "measurement_reused": measured is not None,
                     "trained": checkpoint is not None, "checkpoint_sha256": sha(checkpoint) if checkpoint else None}
+                if name == "alfworld":
+                    record.update(policy="semantic_st_new_encoder", initial_fingerprint=baseline["initial_fingerprint"],
+                        retrieved_count=len(baseline["candidates"]), dropped_count=len(drops),
+                        action_keys=[branch["action_key"]])
                 save(output / "policy_parts" / (digest(work["task_id"]) + ".json"), record)
                 records.append(record)
         finally:
@@ -471,11 +481,31 @@ def run_pddl(args, item, jobs):
                 gate.close()
             if runner:
                 runner.close()
-    target = args.output_dir / "pddl"
+    target = args.output_dir / name
     target.mkdir(exist_ok=True)
     (target / "policies.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
     mean = lambda field, key: statistics.mean(r[field][key] for r in records)
     complete = all(r["old_encoder_same_rule_outcome"] is not None for r in records)
+    if name == "alfworld":
+        data = jobs[0]["item"]["config"]["experiments"][name]
+        primary = set(data.get("primary_test_ids", data["split"]["test"]))
+        if {r["task_id"] for r in records} != set(data["split"]["test"]) or len(records) != len(data["split"]["test"]):
+            raise ValueError("incomplete ALFWorld encoder evaluation; refusing partial averages")
+        if not primary or not primary <= set(data["split"]["test"]):
+            raise ValueError("invalid ALFWorld primary test cohort")
+        cohorts = {"primary": sorted(primary), **data.get("test_cohorts", {})}
+        summaries = {}
+        for cohort, ids in cohorts.items():
+            cohort_ids = set(ids)
+            if not cohort_ids or len(cohort_ids) != len(ids) or not cohort_ids <= set(data["split"]["test"]):
+                raise ValueError("invalid ALFWorld test cohort")
+            chosen = [r for r in records if r["task_id"] in cohort_ids]
+            summaries[cohort] = {"n": len(chosen), "baseline": statistics.mean(r["baseline_outcome"]["success"] for r in chosen),
+                "new_encoder": statistics.mean(r["outcome"]["success"] for r in chosen),
+                "old_encoder_same_rule": statistics.mean(r["old_encoder_same_rule_outcome"]["success"] for r in chosen)
+                    if all(r["old_encoder_same_rule_outcome"] is not None for r in chosen) else None}
+        return {"rule": rule, "metric": "Success", **summaries["primary"], "cohort_results": summaries,
+                "evaluated_test_tasks": len(records), "untrained_empty_only_tasks": sum(not r["trained"] for r in records)}
     return {"rule": rule, "n": len(records), "metric": "Success", "baseline": mean("baseline_outcome", "success"),
         "new_encoder": mean("outcome", "success"), "old_encoder_same_rule":
         mean("old_encoder_same_rule_outcome", "success") if complete else None,
@@ -520,7 +550,7 @@ def main(argv=None):
         if not planning:
             args.output_dir.parent.mkdir(parents=True, exist_ok=True)
             stack.enter_context(experiment_lock(args.output_dir))
-            if "pddl" in args.datasets:
+            if set(args.datasets) & set(INTERACTIVE_DATASETS):
                 # Same mixed root as the ongoing ALFWorld continuation: fail, never stop it.
                 stack.enter_context(experiment_lock(args.interactive_root))
         prepared, jobs, manifest = prepare(args)
@@ -545,7 +575,8 @@ def main(argv=None):
                     state["current_dataset"] = name
                     save(args.output_dir / "progress.json", state)
                     selected = [job for job in jobs if job["name"] == name]
-                    results[name] = run_pddl(args, item, selected) if name == "pddl" else run_qa(args, name, item, selected[0])
+                    results[name] = (run_pddl(args, item, selected, name=name) if name in INTERACTIVE_DATASETS
+                                     else run_qa(args, name, item, selected[0]))
                     report(args, results)
             state["status"] = "completed"
         except BaseException as exc:

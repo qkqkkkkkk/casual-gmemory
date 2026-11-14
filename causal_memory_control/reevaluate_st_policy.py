@@ -128,35 +128,39 @@ def prepare_qa(suite, name, identity):
 
 
 def prepare_pddl(suite, identity):
+    return prepare_interactive(suite, identity, "pddl")
+
+
+def prepare_interactive(suite, identity, name):
     from .interactive_runtime import ActionStore
     from .interactive_empty_memory import training_artifacts
     from .interactive_worker import snapshot
     from .run_interactive_gate_benchmark import dataset_jobs
 
-    rule = resolve_rule(suite.st_deletion_rule, "pddl")
+    rule = resolve_rule(suite.st_deletion_rule, name)
     root = suite.interactive_root
     config = read(root / "benchmark_manifest.json")
     if Path(config["output_dir"]).resolve() != root:
-        raise ValueError("PDDL root does not match its registered manifest")
+        raise ValueError(f"{name} root does not match its registered manifest")
     separate_output(suite.output_dir, root)
     pin(identity, root / "benchmark_manifest.json")
     jobs, seen = [], set()
-    for label, expected in dataset_jobs(config, "pddl"):
+    for label, expected in dataset_jobs(config, name):
         directory = Path(expected["output_dir"])
         path = directory / "benchmark_manifest.json"
         child = read(path)
         if child != expected:
-            raise ValueError(f"PDDL fold configuration changed: {path}")
-        memory = snapshot(child, "pddl")
-        source = directory / "pddl"
+            raise ValueError(f"{name} configuration changed: {path}")
+        memory = snapshot(child, name)
+        source = directory / name
         old_identity = read(source / "evaluation/actions/identity.json")
-        checkpoints, skipped = training_artifacts(child, "pddl")
+        checkpoints, skipped = training_artifacts(child, name)
         expected_identity = {"config_digest": digest(child), "snapshot_sha256": sha(source / "snapshot.json"),
                              "checkpoints_sha256": checkpoints, "phase": "test"}
         if skipped:
             expected_identity["untrained_methods"] = skipped
         if old_identity != expected_identity:
-            raise ValueError("PDDL measured actions no longer match their registered inputs")
+            raise ValueError(f"{name} measured actions no longer match their registered inputs")
         store = ActionStore(source / "evaluation/actions", old_identity)
         checkpoint = source / "semantic_st/checkpoint.json"
         if checkpoint.exists():
@@ -167,9 +171,9 @@ def prepare_pddl(suite, identity):
         for path in (path, source / "snapshot.json", source / "evaluation/actions/identity.json"):
             pin(identity, path)
         work = []
-        for task_id in child["experiments"]["pddl"]["split"]["test"]:
+        for task_id in child["experiments"][name]["split"]["test"]:
             if task_id in seen:
-                raise ValueError("PDDL task appears in more than one outer test fold")
+                raise ValueError(f"{name} task appears in more than one test partition")
             seen.add(task_id)
             part = source / "evaluation/policy_parts" / (digest(task_id) + ".json")
             pin(identity, part)
@@ -177,7 +181,7 @@ def prepare_pddl(suite, identity):
             by_policy = {r["policy"]: r for r in records}
             old = by_policy["semantic_st"]
             if old["config_digest"] != digest(child):
-                raise ValueError("previous PDDL ST evaluation belongs to a different configuration")
+                raise ValueError(f"previous {name} ST evaluation belongs to a different configuration")
             index = source / "evaluation/actions/baselines" / (digest([task_id, child["evaluation_seed"]]) + ".json")
             baseline = store.get(task_id, child["evaluation_seed"], read(index), [])
             if baseline is None:
@@ -188,13 +192,13 @@ def prepare_pddl(suite, identity):
                     or old["retrieved_count"] != len(baseline["candidates"])
                     or [d["memory_id"] for d in old["decisions"]] !=
                        [c["memory_id"] for c in baseline["candidates"]]):
-                raise ValueError("previous PDDL decisions do not match the measured candidate list")
+                raise ValueError(f"previous {name} decisions do not match the measured candidate list")
             if not checkpoint.exists() and baseline["candidates"]:
                 raise ValueError("an untrained fold cannot apply ST to nonempty test candidates")
             previous_branch = store.get(task_id, baseline["seed"], baseline, old["drop_ids"])
             if (previous_branch is None or old["outcome"] != previous_branch["outcome"]
                     or old["action_keys"] != [previous_branch["action_key"]]):
-                raise ValueError("previous PDDL policy outcome differs from its measured action")
+                raise ValueError(f"previous {name} policy outcome differs from its measured action")
             drops, decisions = selection(old, rule)
             measured = store.get(task_id, baseline["seed"], baseline, drops)
             for key in {baseline["action_key"], *(old["action_keys"]),
@@ -217,7 +221,9 @@ def prepare(suite):
         pin(identity, path)
     prepared = {}
     for name in suite.datasets:
-        prepared[name] = prepare_pddl(suite, identity) if name == "pddl" else prepare_qa(suite, name, identity)
+        prepared[name] = (prepare_pddl(suite, identity) if name == "pddl" else
+                          prepare_interactive(suite, identity, name) if name == "alfworld" else
+                          prepare_qa(suite, name, identity))
     policy = ({"rule": "dataset_default", "datasets": {
         name: policy_spec(suite.st_deletion_rule, name) for name in suite.datasets}}
         if suite.st_deletion_rule == "dataset_default" else policy_spec(suite.st_deletion_rule, suite.datasets[0]))

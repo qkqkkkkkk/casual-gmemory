@@ -122,14 +122,13 @@ class EncoderFitTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "disjoint"):
                 cli.partitions(bad)
 
-    def test_execution_opt_in_and_no_alfworld_mode(self):
+    def test_execution_opt_in_and_explicit_alfworld_support(self):
         with tempfile.TemporaryDirectory() as directory, redirect_stderr(io.StringIO()):
             argv = arguments(Path(directory))
             self.assertEqual(cli.parse_args(argv).stage, "plan")
             with self.assertRaises(SystemExit):
                 cli.parse_args([*argv, "--stage", "all"])
-            with self.assertRaises(SystemExit):
-                cli.parse_args([*argv, "--datasets", "alfworld"])
+            self.assertEqual(cli.parse_args([*argv, "--datasets", "alfworld"]).datasets, ["alfworld"])
             self.assertEqual(cli.parse_args([*argv, "--stage", "all", "--refit-head"]).stage, "all")
 
     def test_pddl_lock_conflict_does_not_interrupt_running_experiment(self):

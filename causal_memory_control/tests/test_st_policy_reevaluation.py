@@ -96,13 +96,13 @@ def source_bytes(root):
 class STPolicyTests(unittest.TestCase):
     def test_dataset_mapping_and_manual_overrides(self):
         for name, expected in (("fever", "calibrated"), ("hotpotqa", "positive_unlimited"),
-                               ("pddl", "positive_unlimited")):
+                               ("pddl", "positive_unlimited"), ("alfworld", "calibrated")):
             with self.subTest(dataset=name):
                 self.assertEqual(resolve_rule("dataset_default", name), expected)
                 self.assertEqual(resolve_rule("calibrated", name), "calibrated")
                 self.assertEqual(resolve_rule("positive_unlimited", name), "positive_unlimited")
         with self.assertRaisesRegex(ValueError, "no default"):
-            resolve_rule("dataset_default", "alfworld")
+            resolve_rule("dataset_default", "unknown_dataset")
         with self.assertRaisesRegex(ValueError, "unsupported"):
             resolve_rule("unknown", "fever")
 
@@ -237,8 +237,9 @@ class STReevaluationTests(unittest.TestCase):
              mock.patch.object(cli, "prepare_pddl", side_effect=pddl_plan):
             _, manifest = cli.prepare(suite)
             effective = {name: plan["deletion_rule"] for name, plan in manifest["datasets"].items()}
-            self.assertEqual(effective, DATASET_RULES)
-            self.assertEqual({name: spec["rule"] for name, spec in manifest["policy"]["datasets"].items()}, DATASET_RULES)
+            expected = {name: DATASET_RULES[name] for name in suite.datasets}
+            self.assertEqual(effective, expected)
+            self.assertEqual({name: spec["rule"] for name, spec in manifest["policy"]["datasets"].items()}, expected)
             self.assertEqual(suite.st_deletion_rule, "dataset_default")
             self.assertEqual(manifest["new_training_runs"], 0)
 
