@@ -25,18 +25,21 @@ from causal_memory_control.tests import test_fever_experiment as fever_tests
 from causal_memory_control.tests import test_hotpotqa_gate as hotpot_tests
 
 
-def fixture(root, name):
+def fixture(root, name, *, training_task_limit=None):
     """Real measured QA branches/checkpoint, without any completed test log."""
     adapter, args = prepare_source(root, name)
     old = root / "old" / name / "semantic_st"
     checkpoint = root / "old" / name / "checkpoint.json"
     sources = sorted(args.diagnostic_results.glob("*/branches.jsonl"))
+    snapshot = cli.reuse.read(args.memory_dir / "causal_snapshot_manifest.json")
+    task_subset = (["--task-ids", ",".join(map(str, snapshot["evaluation_ids"][:training_task_limit]))]
+                   if training_task_limit is not None else [])
     train_gate.main(["--input", *map(str, sources), "--output", str(checkpoint),
         "--memory-dir", str(args.memory_dir), "--estimator", "st", "--metric", adapter.training_metric,
         "--feature-version", "3", "--ensemble-size", "2", "--st-hidden-sizes", "8,4", "--st-epochs", "2",
-        "--calibration-fraction", ".2", "--semantic-model", "test-encoder", "--semantic-revision", "fixed-test"])
+        "--calibration-fraction", ".2", "--semantic-model", "test-encoder", "--semantic-revision", "fixed-test",
+        *task_subset])
     payload = cli.reuse.read(checkpoint)
-    snapshot = cli.reuse.read(args.memory_dir / "causal_snapshot_manifest.json")
     policy = payload["training_metadata"]["policy_calibration"]
     args.checkpoint = checkpoint
     args.output_dir = root / "old" / name
@@ -148,12 +151,19 @@ class TuningTests(unittest.TestCase):
             fixture(root, "fever")
             source = root / "source/benchmark_manifest.json"
             first = cli.reuse.read(source)
-            fixture(root, "hotpotqa")
+            _, hotpot_args = fixture(root, "hotpotqa", training_task_limit=10)
             second = cli.reuse.read(source)
             for key in ("experiments", "semantic"):
                 first[key].update(second[key])
             save(source, first)
             argv = arguments(root, "fever,hotpotqa")
+            jobs, plan = cli.prepare(cli.parse_args(argv))
+            old_hotpot_tasks = jobs["hotpotqa"]["fit"] | jobs["hotpotqa"]["dev"]
+            self.assertEqual(len(old_hotpot_tasks), 10)
+            self.assertLess(len(old_hotpot_tasks), hotpot_args.training_claims)
+            counts = plan["sources"]["hotpotqa"]["partition_counts"]
+            self.assertEqual(counts["unused_registered_training_tasks"], hotpot_args.training_claims - 10)
+            self.assertEqual(counts["checkpoint_training_tasks"], 10)
             result = cli.main([*argv, "--stage", "tune", "--refit-head"])
             self.assertEqual(set(result["selected_checkpoints_sha256"]), {"fever", "hotpotqa"})
             self.assertTrue(all(set(row["per_dataset_relative_mse"]) == {"fever", "hotpotqa"}
@@ -161,6 +171,9 @@ class TuningTests(unittest.TestCase):
             for name in ("fever", "hotpotqa"):
                 paths = list((root / "tuned" / name / "trials").glob("*/trial.json"))
                 self.assertEqual(len(paths), 3)
+            for path in (root / "tuned/hotpotqa/trials").glob("*/checkpoint.json"):
+                payload = cli.reuse.read(path)
+                self.assertEqual(cli.partitions(payload), (jobs["hotpotqa"]["fit"], jobs["hotpotqa"]["dev"]))
             with self.assertRaisesRegex(ValueError, "registered input/configuration changed"):
                 cli.main([*argv, "--datasets", "fever", "--stage", "tune", "--refit-head"])
 
@@ -190,6 +203,38 @@ class TuningTests(unittest.TestCase):
             save(manifest, value)
             with self.assertRaisesRegex(ValueError, "partition mismatch or leakage"):
                 cli.main(argv)
+
+    def test_reject_checkpoint_tasks_outside_training_pool_and_support_test_overlap(self):
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            root = Path(directory)
+            self.setup_stack(stack)
+            _, source_args = fixture(root, "hotpotqa", training_task_limit=10)
+            argv = arguments(root, "hotpotqa")
+            args = cli.parse_args(argv)
+            jobs, _ = cli.prepare(args)
+            used = sorted(jobs["hotpotqa"]["fit"] | jobs["hotpotqa"]["dev"])[0]
+            path = jobs["hotpotqa"]["memory"] / "causal_snapshot_manifest.json"
+            original = cli.reuse.read(path)
+            for reason in ("checkpoint_tasks_outside_training_pool", "checkpoint_tasks_in_test_or_support",
+                           "registered_training_overlap", "support_test_overlap"):
+                with self.subTest(reason=reason):
+                    snapshot = deepcopy(original)
+                    if reason == "checkpoint_tasks_outside_training_pool":
+                        snapshot["evaluation_ids"] = [999 if str(v) == used else v
+                                                      for v in snapshot["evaluation_ids"]]
+                    elif reason == "checkpoint_tasks_in_test_or_support":
+                        snapshot["support_ids"].append(int(used))
+                    elif reason == "registered_training_overlap":
+                        unused = next(v for v in original["evaluation_ids"][:source_args.training_claims]
+                                      if str(v) not in (jobs["hotpotqa"]["fit"] | jobs["hotpotqa"]["dev"]))
+                        snapshot["support_ids"].append(unused)
+                    else:
+                        snapshot["support_ids"].append(snapshot["evaluation_ids"][-1])
+                    save(path, snapshot)
+                    with self.assertRaisesRegex(ValueError, reason):
+                        cli.prepare(args)
+            save(path, original)
+            self.assertFalse((root / "tuned").exists())
 
     def test_output_lock_and_incomplete_trial_resume(self):
         with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:

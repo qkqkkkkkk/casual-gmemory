@@ -143,9 +143,30 @@ def prepare(args):
         test = {str(t) for t in snapshot["evaluation_ids"][source_args.training_claims:source_args.evaluation_count]}
         training = {str(t) for t in snapshot["evaluation_ids"][:source_args.training_claims]}
         support = {str(t) for t in snapshot["support_ids"]}
-        if (fit | dev != training or (fit | dev) & (test | support)
-                or test != {str(t) for t in previous["evaluation_ids"]}):
-            raise ValueError(f"{name}: original fit/dev/support/test partition mismatch or leakage")
+        # Historical heads may use only a measured subset of the registered
+        # training pool. Preserve that exact fit/dev split instead of requiring
+        # unused training tasks to have labels or adding them to the new fit.
+        checkpoint_tasks = fit | dev
+        recorded_test = {str(t) for t in previous["evaluation_ids"]}
+        partition_counts = {"registered_training_tasks": len(training),
+            "checkpoint_training_tasks": len(checkpoint_tasks),
+            "unused_registered_training_tasks": len(training - checkpoint_tasks),
+            "fit_tasks": len(fit), "dev_tasks": len(dev),
+            "support_tasks": len(support), "test_tasks": len(test)}
+        conflicts = {key: sorted(values) for key, values in {
+            "checkpoint_tasks_outside_training_pool": checkpoint_tasks - training,
+            "checkpoint_tasks_in_test_or_support": checkpoint_tasks & (test | support),
+            "registered_training_overlap": training & (test | support),
+            "support_test_overlap": support & test,
+            "missing_recorded_test_tasks": test - recorded_test,
+            "unexpected_recorded_test_tasks": recorded_test - test,
+        }.items() if values}
+        if conflicts:
+            details = {"counts": partition_counts,
+                "conflicts": {key: {"count": len(values), "first_ids": values[:10]}
+                              for key, values in conflicts.items()}}
+            raise ValueError(f"{name}: original fit/dev/support/test partition mismatch or leakage; "
+                             + json.dumps(details, ensure_ascii=False, sort_keys=True))
         adapter.validate_checkpoint(payload, source_args, snapshot)
         metadata = payload["training_metadata"]
         recorded = [Path(p) for p in metadata["training_sources"]]
@@ -154,6 +175,7 @@ def prepare(args):
             raise ValueError(f"{name}: original measured training labels changed")
         job = jobs[name] = {"name": name, "checkpoint": checkpoint, "payload": payload,
             "sources": sources, "memory": source_args.memory_dir, "fit": fit, "dev": dev,
+            "partition_counts": partition_counts,
             "deployment": {k: previous[k] for k in ("kappa", "delta", "max_drops")}}
         for root in (checkpoint.parent, job["memory"], *(p.parent for p in sources)):
             reuse.separate_output(args.output_dir, root)
@@ -178,6 +200,7 @@ def prepare(args):
         "train_device": args.train_device, "trials": specs, "selection": SELECTION,
         "sources": {name: {"checkpoint": str(j["checkpoint"]), "fit_tasks": len(j["fit"]),
             "dev_tasks": len(j["dev"]), "rule": resolve_rule("dataset_default", name),
+            "partition_counts": j["partition_counts"],
             "deployment": j["deployment"],
             "effective_trials": {s["id"]: {"head": effective(j, s)[0], "chunk_tokens": effective(j, s)[1]}
                                  for s in specs}} for name, j in jobs.items()},

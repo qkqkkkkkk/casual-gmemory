@@ -8,6 +8,7 @@
 
 - 仅支持 FEVER、HotpotQA。默认两者一起运行，各训练自己的预测头，从两者开发集共同选择一个共享的参数配置编号。
 - 复用原 checkpoint 登记的原始 USE / SINGLE DROP 诊断标签、冻结记忆、任务级 fit/dev 划分。没有重新采集；没有 CE 计算；没有训练编码器。
+- 旧 checkpoint 的 fit/dev 可以只覆盖预留训练池的一个子集；调参严格复用这个子集，不补采、不扩大训练范围、不重新划分。计划中的 `partition_counts` 分别报告训练池、旧头实际使用、未使用、support 和 test 的任务数。仍拒绝池外任务、fit/dev 重叠、任何 support/test 泄漏及原评测任务不一致；出错时会列出冲突数量和前 10 个任务 ID。
 - 输入分块仍是原实现的“逐块编码、平均、归一化”，改变的是 tokenizer token 窗口长度。它不会改变 GMemory 的检索编码器、检索列表或生成模型上下文窗口。
 - FEVER 沿用原保守删除规则和已保存的 kappa / delta / 删除预算；HotpotQA 沿用 `positive_unlimited`，保留预测 U > 0 的条目。调参不搜索删除规则，也不重新校准这些数值。
 - `tune` 只训练小头和计算 dev 的效用预测误差，不调用 Ollama、不生成测试答案、不读取测试结果日志。`evaluate` 是显式的另一个阶段，只评测共同选中的配置，不逐一测试所有配置。
